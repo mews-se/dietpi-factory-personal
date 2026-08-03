@@ -50,9 +50,11 @@ cd build
 
 if [ -z "$FILE" ]; then
     FILE=$PWD/$(basename "$URL")
+    exec 8>.download.lock
+    flock 8
     if [ ! -f "$FILE" ]; then
         echo "Downloading $(basename "$URL")..."
-        curl -fLO "$URL"
+        curl -fL -o "$FILE.part" "$URL" && mv "$FILE.part" "$FILE"
         if curl -fsLO "$URL.sha256" 2>/dev/null; then
             sha256sum -c "$(basename "$URL").sha256"
         fi
@@ -60,41 +62,58 @@ if [ -z "$FILE" ]; then
 fi
 
 case $FILE in
-    *.img.xz) IMG=${FILE%.xz}; [ -f "$IMG" ] || xz -dk "$FILE" ;;
+    *.img.xz)
+        IMG=${FILE%.xz}
+        if [ ! -f "$IMG" ]; then
+            xz -dc "$FILE" > "$IMG.part"
+            mv "$IMG.part" "$IMG"
+        fi
+        ;;
     *.img)    IMG=$FILE ;;
     *) echo "Error: expected a .img or .img.xz file." >&2; exit 1 ;;
 esac
+exec 8>&- 2>/dev/null || true
 
 OUT=${IMG%.img}-$PROFILE_NAME.img
-cp "$IMG" "$OUT"
-
-LOOP=$(losetup -fP --show "$OUT")
-MNT=$(mktemp -d)
+OUTTMP=$(mktemp "$(dirname "$OUT")/.$(basename "$OUT").XXXXXX")
+LOOP='' MOUNTED=0
 cleanup() {
-    mountpoint -q "$MNT" && umount "$MNT"
-    losetup -d "$LOOP" 2>/dev/null
-    rmdir "$MNT" 2>/dev/null
+    set +e
+    [ "$MOUNTED" = 1 ] && umount "$MNT"
+    [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
+    [ -n "${MNT:-}" ] && rmdir "$MNT" 2>/dev/null
+    rm -f "$OUTTMP"
 }
 trap cleanup EXIT
+cp "$IMG" "$OUTTMP"
+LOOP=$(losetup -fP --show "$OUTTMP")
+MNT=$(mktemp -d)
 
 # dietpi.txt sits on the boot partition on SBC images and in /boot on the
 # rootfs on PC images, container images have no partition table at all
+# validate the whole profile before doing anything destructive
+grep -qE '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
+BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$PROFILE_DIR/dietpi.txt" || true)
+[ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
+
 shopt -s nullglob
 TARGET=
 for part in "$LOOP"p* "$LOOP"; do
     mount "$part" "$MNT" 2>/dev/null || continue
+    MOUNTED=1
     if [ -f "$MNT/dietpi.txt" ]; then TARGET=$MNT; break; fi
     if [ -f "$MNT/boot/dietpi.txt" ]; then TARGET=$MNT/boot; break; fi
     umount "$MNT"
+    MOUNTED=0
 done
 [ -n "$TARGET" ] || { echo "Error: no dietpi.txt found in the image." >&2; exit 1; }
 
 while IFS= read -r line; do
-    case $line in [A-Z]*=*) ;; *) continue ;; esac
+    [[ $line =~ ^[A-Z][A-Z0-9_]*= ]] || continue
     key=${line%%=*}
     sed -i "/^${key}=/d;/^#${key}=/d" "$TARGET/dietpi.txt"
 done < "$PROFILE_DIR/dietpi.txt"
-{ echo; grep "^[A-Z0-9_]*=" "$PROFILE_DIR/dietpi.txt"; } >> "$TARGET/dietpi.txt"
+{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt"; } >> "$TARGET/dietpi.txt"
 [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TARGET/Automation_Custom_Script.sh"
 
 # make the very first time sync use the profile mirror as well; only doable
@@ -106,7 +125,10 @@ if [ -n "$mirror" ] && [ -d "$MNT/etc/systemd" ]; then
 fi
 
 umount "$MNT"
+MOUNTED=0
 losetup -d "$LOOP"
+LOOP=''
+mv "$OUTTMP" "$OUT"
 trap - EXIT
 rmdir "$MNT"
 

@@ -13,10 +13,15 @@
 # confirmation.
 set -euo pipefail
 
-INSTALLER_URL=https://raw.githubusercontent.com/MichaIng/DietPi/master/.build/images/dietpi-installer
 PROFILE_URL=https://raw.githubusercontent.com/mews-se/dietpi-factory-personal/main/config
 PROFILE_DIR=${PROFILE_DIR:-${1:-}}
 ASSUME_YES=${ASSUME_YES:-0}
+
+resolve_dietpi_ref() {
+    local sha
+    sha=$(curl -fsS https://api.github.com/repos/MichaIng/DietPi/commits/master 2>/dev/null | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
+    [[ $sha =~ ^[0-9a-f]{40}$ ]] && echo "$sha"
+}
 
 [ "$EUID" -eq 0 ] || { echo "Error: run as root." >&2; exit 1; }
 . /etc/os-release 2>/dev/null || { echo "Error: cannot read /etc/os-release." >&2; exit 1; }
@@ -34,7 +39,7 @@ case ${VERSION_CODENAME:-} in
     *) echo "Error: unsupported Debian release '${VERSION_CODENAME:-unknown}'." >&2; exit 1 ;;
 esac
 
-VIRT=$(systemd-detect-virt 2>/dev/null || echo none)
+VIRT=$(systemd-detect-virt 2>/dev/null) || VIRT=none
 case $VIRT in
     lxc|lxc-libvirt|openvz|systemd-nspawn) HW_MODEL=75 ;;
     none) HW_MODEL=21 ;;
@@ -57,6 +62,11 @@ else
     curl -fsSL "$PROFILE_URL/dietpi.txt" -o "$TMPD/dietpi.txt"
     curl -fsSL "$PROFILE_URL/Automation_Custom_Script.sh" -o "$TMPD/Automation_Custom_Script.sh"
 fi
+
+# validate the whole profile before doing anything destructive
+grep -qE '^[A-Z][A-Z0-9_]*=' "$TMPD/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
+BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$TMPD/dietpi.txt" || true)
+[ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
 
 echo "This converts $PRETTY_NAME on $(hostname) to DietPi."
 echo "Detected: $([ "$VIRT" = none ] && echo "bare metal" || echo "$VIRT") (HW_MODEL=$HW_MODEL), target distro $VERSION_CODENAME."
@@ -83,25 +93,28 @@ if [ "$ASSUME_YES" != 1 ]; then
 fi
 
 apt-get update
-curl -fsSL "$INSTALLER_URL" -o /tmp/dietpi-installer
-GITOWNER=MichaIng GITBRANCH=master HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
-    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash /tmp/dietpi-installer
-rm -f /tmp/dietpi-installer
+DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit." >&2; exit 1; }
+curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
+GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
+    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer
+rm -f "$TMPD"/dietpi-installer
 
 # the conversion can remove the network stack that was in use (ifupdown2,
 # netplan, cloud-init) and clears the APT lists, so make sure ifupdown and a
 # DHCP client are there for the reboot
+DHCP_PKG=isc-dhcp-client
+[ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
 apt-get update -q
-DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown isc-dhcp-client
+DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown "$DHCP_PKG"
 
 # the installer ships the stock dietpi.txt, so drop its copies of the profile
 # keys and append ours (DietPi reads the first match)
 while IFS= read -r line; do
-    case $line in [A-Z]*=*) ;; *) continue ;; esac
+    [[ $line =~ ^[A-Z][A-Z0-9_]*= ]] || continue
     key=${line%%=*}
     sed -i "/^${key}=/d;/^#${key}=/d" /boot/dietpi.txt
 done < "$TMPD/dietpi.txt"
-{ echo; grep "^[A-Z0-9_]*=" "$TMPD/dietpi.txt"; } >> /boot/dietpi.txt
+{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$TMPD/dietpi.txt"; } >> /boot/dietpi.txt
 [ ! -r "$TMPD/Automation_Custom_Script.sh" ] || cp "$TMPD/Automation_Custom_Script.sh" /boot/Automation_Custom_Script.sh
 
 # make the very first time sync use the profile mirror as well, the boot

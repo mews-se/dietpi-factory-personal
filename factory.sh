@@ -4,6 +4,7 @@
 # Uses whiptail when available, plain prompts otherwise.
 set -euo pipefail
 cd "$(dirname "$0")"
+umask 077
 
 HAVE_WHIPTAIL=0
 command -v whiptail >/dev/null 2>&1 && HAVE_WHIPTAIL=1
@@ -14,7 +15,7 @@ ask() {
     else
         local reply
         read -rp "$2 [$3]: " reply
-        echo "${reply:-$3}"
+        printf '%s\n' "${reply:-$3}"
     fi
 }
 
@@ -28,10 +29,23 @@ confirm() {
     fi
 }
 
+askpw() {
+    if [ "$HAVE_WHIPTAIL" -eq 1 ]; then
+        whiptail --backtitle "dietpi-factory" --title "$1" --passwordbox "$2" 10 70 3>&1 1>&2 2>&3
+    else
+        local reply
+        read -rsp "$2: " reply
+        echo >&2
+        printf '%s\n' "$reply"
+    fi
+}
+
 PROFILE=$(ask "Profile" "Profile name (directory under profiles/):" "default")
 [ -n "$PROFILE" ] || { echo "Error: profile name is required." >&2; exit 1; }
+case $PROFILE in *[!A-Za-z0-9._-]*|.|..) echo "Error: profile name may only contain letters, digits, dot, dash and underscore." >&2; exit 1 ;; esac
 
 CT_HOSTNAME=$(ask "Hostname" "Hostname:" "dietpi")
+[[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#CT_HOSTNAME} -le 63 ] || { echo "Error: invalid hostname '$CT_HOSTNAME'." >&2; exit 1; }
 TIMEZONE=$(ask "Timezone" "Timezone:" "Europe/Stockholm")
 KEYBOARD=$(ask "Keyboard" "Keyboard layout:" "se")
 LOCALE=$(ask "Locale" "Locale:" "en_US.UTF-8")
@@ -60,7 +74,8 @@ elif [ -n "$PUBKEY_INPUT" ]; then
     esac
 fi
 
-PASSWORD=$(ask "Password" "Global password (change after install!):" "dietpi")
+PASSWORD=$(askpw "Password" "Global password (empty = dietpi, change after install!)")
+[ -n "$PASSWORD" ] || PASSWORD=dietpi
 SOFTWARE_IDS=$(ask "DietPi software" "dietpi-software IDs, space separated (see https://dietpi.com/docs/software/):" "")
 APT_PACKAGES=$(ask "APT packages" "Extra APT packages, space separated:" "")
 
@@ -103,6 +118,11 @@ mkdir -p "$OUTDIR"
 } > "$OUTDIR/dietpi.txt"
 
 cp config/Automation_Custom_Script.sh "$OUTDIR/Automation_Custom_Script.sh"
+
+# older wizard versions created world readable profiles, repair on rewrite
+chmod 700 "$OUTDIR"
+chmod 600 "$OUTDIR/dietpi.txt"
+chmod 700 "$OUTDIR/Automation_Custom_Script.sh"
 
 echo
 echo "Profile written to $OUTDIR/"
