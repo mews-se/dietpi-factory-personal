@@ -1,0 +1,2 @@
+# Generated profiles can contain passwords and SSH keys - never commit them
+profiles/
