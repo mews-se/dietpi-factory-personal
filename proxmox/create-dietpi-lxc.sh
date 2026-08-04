@@ -116,9 +116,10 @@ pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubuserc
     PREIMAGE_INFO='Debian LXC template' WIFI_REQUIRED=0 bash \"\$I\""
 
 # dietpi-software initialises Dropbear as pre-installed although container
-# images never ship it, which makes the first run skip the SSH server -
-# pre-seed the state file with the truth, it is read after the defaults
-pct exec "$CTID" -- bash -c 'echo "aSOFTWARE_INSTALL_STATE[104]=0" > /boot/dietpi/.installed'
+# images never ship it, which makes the first run skip the SSH server.
+# Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
+# the state file itself, so only add the line while master still lacks it
+pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/dietpi/.installed 2>/dev/null || echo "aSOFTWARE_INSTALL_STATE[104]=0" >> /boot/dietpi/.installed'
 
 # the conversion removes ifupdown2 from the template and clears the APT lists
 echo "Installing ifupdown..."
