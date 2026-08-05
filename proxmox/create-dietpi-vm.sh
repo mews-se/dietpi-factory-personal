@@ -32,6 +32,21 @@ require_uint() {
     [ "$2" -ge "$3" ] && [ "$2" -le "$4" ] || { echo "Error: $1 must be between $3 and $4." >&2; exit 1; }
 }
 
+DIETPI_SIGNING_KEY=C2C4D1DEF7C96C6EDF3937B2536B2A4A2E72D870
+
+# verify the detached signature next to the file against the pinned DietPi
+# signing key, in a throwaway keyring so the host one is neither trusted nor touched
+verify_signature() {
+    command -v gpg >/dev/null 2>&1 || { echo "Error: gpg not found, cannot verify the image signature." >&2; exit 1; }
+    local gnupg_tmp status
+    gnupg_tmp=$(mktemp -d)
+    chmod 700 "$gnupg_tmp"
+    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg -q --import 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not import the DietPi signing key." >&2; exit 1; }
+    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --verify "$1.asc" "$1" 2>/dev/null) || true
+    rm -rf "$gnupg_tmp"
+    grep -q "^\[GNUPG:\] VALIDSIG $DIETPI_SIGNING_KEY " <<< "$status" || { echo "Error: GPG signature verification failed for $(basename "$1")." >&2; exit 1; }
+}
+
 VMID=$(ask "VM ID" "VM ID:" "$(pvesh get /cluster/nextid)")
 VM_NAME=$(ask "Name" "VM name:" "dietpi")
 CORES=$(ask "CPU" "Number of cores:" "2")
@@ -71,10 +86,12 @@ exec 8>"$CACHE/.download.lock"
 flock 8
 if [ ! -f "$QCOW2" ]; then
     echo "Downloading ${IMAGE}..."
-    rm -f "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256"
+    rm -f "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
     curl -fL -o "$CACHE/$IMAGE" "$BASE_URL/$IMAGE"
     curl -fsL -o "$CACHE/$IMAGE.sha256" "$BASE_URL/$IMAGE.sha256"
+    curl -fsL -o "$CACHE/$IMAGE.asc" "$BASE_URL/$IMAGE.asc"
     ( cd "$CACHE" && sha256sum -c "$IMAGE.sha256" )
+    verify_signature "$CACHE/$IMAGE"
     xz -dc "$CACHE/$IMAGE" > "$QCOW2.part"
     mv "$QCOW2.part" "$QCOW2"
 fi

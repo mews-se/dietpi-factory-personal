@@ -36,6 +36,21 @@ pick_image() {
     fi
 }
 
+DIETPI_SIGNING_KEY=C2C4D1DEF7C96C6EDF3937B2536B2A4A2E72D870
+
+# verify the detached signature next to the file against the pinned DietPi
+# signing key, in a throwaway keyring so the host one is neither trusted nor touched
+verify_signature() {
+    command -v gpg >/dev/null 2>&1 || { echo "Error: gpg not found, cannot verify the image signature." >&2; exit 1; }
+    local gnupg_tmp status
+    gnupg_tmp=$(mktemp -d)
+    chmod 700 "$gnupg_tmp"
+    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg -q --import 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not import the DietPi signing key." >&2; exit 1; }
+    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --verify "$1.asc" "$1" 2>/dev/null) || true
+    rm -rf "$gnupg_tmp"
+    grep -q "^\[GNUPG:\] VALIDSIG $DIETPI_SIGNING_KEY " <<< "$status" || { echo "Error: GPG signature verification failed for $(basename "$1")." >&2; exit 1; }
+}
+
 FILE=
 if [[ $SRC == http://* || $SRC == https://* ]]; then
     URL=$SRC
@@ -57,6 +72,9 @@ if [ -z "$FILE" ]; then
         curl -fL -o "$FILE.part" "$URL" && mv "$FILE.part" "$FILE"
         if curl -fsLO "$URL.sha256" 2>/dev/null; then
             sha256sum -c "$(basename "$URL").sha256"
+        fi
+        if curl -fsL -o "$FILE.asc" "$URL.asc" 2>/dev/null; then
+            verify_signature "$FILE"
         fi
     fi
 fi
