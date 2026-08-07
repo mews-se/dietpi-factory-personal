@@ -40,6 +40,21 @@ askpw() {
     fi
 }
 
+valid_ipv4() {
+    [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    local IFS=. o
+    for o in $1; do [ "$o" -le 255 ] || return 1; done
+}
+
+valid_netmask() {
+    valid_ipv4 "$1" || return 1
+    local IFS=. o m=0
+    for o in $1; do m=$(( (m << 8) | o )); done
+    # the ones must be contiguous from the top
+    local inv=$(( ~m & 4294967295 ))
+    (( (inv & (inv + 1)) == 0 ))
+}
+
 PROFILE=$(ask "Profile" "Profile name (directory under profiles/):" "default")
 [ -n "$PROFILE" ] || { echo "Error: profile name is required." >&2; exit 1; }
 case $PROFILE in *[!A-Za-z0-9._-]*|.|..) echo "Error: profile name may only contain letters, digits, dot, dash and underscore." >&2; exit 1 ;; esac
@@ -57,6 +72,13 @@ if ! confirm "Network" "Use DHCP? (No = static IP)"; then
     STATIC_MASK=$(ask "Netmask" "Netmask:" "255.255.255.0")
     STATIC_GW=$(ask "Gateway" "Gateway:" "")
     STATIC_DNS=$(ask "DNS" "DNS server(s), space separated:" "9.9.9.9 149.112.112.112")
+    # firstboot applies these verbatim, bad values would leave the machine
+    # without network
+    [ -n "$STATIC_DNS" ] || { echo "Error: static network needs at least one DNS server." >&2; exit 1; }
+    for v in "$STATIC_IP" "$STATIC_GW" $STATIC_DNS; do
+        valid_ipv4 "$v" || { echo "Error: '$v' is not a valid IPv4 address." >&2; exit 1; }
+    done
+    valid_netmask "$STATIC_MASK" || { echo "Error: '$STATIC_MASK' is not a valid netmask." >&2; exit 1; }
 fi
 
 DEFAULT_PUBKEY_FILE=""
@@ -68,9 +90,11 @@ SSH_PUBKEY=""
 if [ -r "$PUBKEY_INPUT" ]; then
     SSH_PUBKEY=$(head -n1 "$PUBKEY_INPUT")
 elif [ -n "$PUBKEY_INPUT" ]; then
+    # a key line always contains a space, a path practically never does;
+    # accept complete authorized_keys lines including options and sk- types
     case $PUBKEY_INPUT in
-        ssh-*|ecdsa-*) SSH_PUBKEY=$PUBKEY_INPUT ;;
-        *) echo "Warning: '$PUBKEY_INPUT' is neither a readable file nor an SSH key, skipping." >&2 ;;
+        *' '*) SSH_PUBKEY=$PUBKEY_INPUT ;;
+        *) echo "Error: '$PUBKEY_INPUT' is not a readable file." >&2; exit 1 ;;
     esac
 fi
 

@@ -63,34 +63,83 @@ fi
 mkdir -p build
 cd build
 
+OFFICIAL=0
+[ -z "$FILE" ] && [[ $URL == "$BASE_URL"/* ]] && OFFICIAL=1
+
 if [ -z "$FILE" ]; then
     FILE=$PWD/$(basename "$URL")
     exec 8>.download.lock
     flock 8
-    if [ ! -f "$FILE" ]; then
-        echo "Downloading $(basename "$URL")..."
-        curl -fL -o "$FILE.part" "$URL" && mv "$FILE.part" "$FILE"
-        if curl -fsLO "$URL.sha256" 2>/dev/null; then
-            sha256sum -c "$(basename "$URL").sha256"
-        fi
-        if curl -fsL -o "$FILE.asc" "$URL.asc" 2>/dev/null; then
-            verify_signature "$FILE"
-        fi
-    fi
 fi
 
 case $FILE in
-    *.img.xz)
-        IMG=${FILE%.xz}
-        if [ ! -f "$IMG" ]; then
-            xz -dc "$FILE" > "$IMG.part"
-            mv "$IMG.part" "$IMG"
-        fi
-        ;;
+    *.img.xz) IMG=${FILE%.xz} ;;
     *.img)    IMG=$FILE ;;
     *) echo "Error: expected a .img or .img.xz file." >&2; exit 1 ;;
 esac
-exec 8>&- 2>/dev/null || true
+
+# official images ship both a checksum and a signature, so both are required
+# and the unpacked image is only reused together with the receipt of a passed
+# verification; anything older or modified is fetched again. Downloads keep
+# their .part name until the checks passed, a failed download cannot be
+# mistaken for a verified one on the next run.
+if [ "$OFFICIAL" = 1 ]; then
+    FRESH=0
+    if [ -f "$IMG" ] && [ -f "$IMG.verified" ] && \
+        [ "$(sha256sum <"$IMG" | awk '{print $1}') $DIETPI_SIGNING_KEY" = "$(cat "$IMG.verified")" ]; then
+        FRESH=1
+    fi
+    if [ "$FRESH" = 0 ]; then
+        echo "Downloading $(basename "$URL")..."
+        rm -f "$IMG" "$IMG.verified"
+        curl -fL -o "$FILE.part" "$URL"
+        curl -fsL -o "$FILE.sha256" "$URL.sha256"
+        curl -fsL -o "$FILE.part.asc" "$URL.asc"
+        [ "$(sha256sum <"$FILE.part" | awk '{print $1}')" = "$(awk '{print $1}' "$FILE.sha256")" ] || \
+            { echo "Error: checksum mismatch for $(basename "$URL")." >&2; exit 1; }
+        verify_signature "$FILE.part"
+        mv "$FILE.part.asc" "$FILE.asc"
+        mv "$FILE.part" "$FILE"
+    fi
+elif [ -n "${URL:-}" ]; then
+    # bind the cached file to its source: a different URL with the same
+    # basename, or a file left behind by an older version, is fetched again
+    SRC_OK=0
+    if [ -f "$FILE" ] && [ -f "$FILE.src" ] && \
+        [ "$URL $(sha256sum <"$FILE" | awk '{print $1}')" = "$(cat "$FILE.src")" ]; then
+        SRC_OK=1
+    fi
+    if [ "$SRC_OK" = 0 ]; then
+        echo "Downloading $(basename "$URL")..."
+        rm -f "$IMG" "$FILE.src"
+        curl -fL -o "$FILE.part" "$URL"
+        # other URLs are verified with whatever sidecars exist next to them
+        curl -fsL -o "$FILE.sha256" "$URL.sha256" 2>/dev/null || rm -f "$FILE.sha256"
+        curl -fsL -o "$FILE.part.asc" "$URL.asc" 2>/dev/null || rm -f "$FILE.part.asc"
+        if [ ! -f "$FILE.sha256" ] && [ ! -f "$FILE.part.asc" ]; then
+            echo "Note: no checksum or signature found next to the URL, continuing unverified."
+        fi
+        if [ -f "$FILE.sha256" ]; then
+            [ "$(sha256sum <"$FILE.part" | awk '{print $1}')" = "$(awk '{print $1}' "$FILE.sha256")" ] || \
+                { echo "Error: checksum mismatch for $(basename "$URL")." >&2; exit 1; }
+        fi
+        if [ -f "$FILE.part.asc" ]; then
+            verify_signature "$FILE.part"
+            mv "$FILE.part.asc" "$FILE.asc"
+        fi
+        mv "$FILE.part" "$FILE"
+        echo "$URL $(sha256sum <"$FILE" | awk '{print $1}')" > "$FILE.src"
+    fi
+fi
+
+if [ "$FILE" != "$IMG" ] && [ ! -f "$IMG" ]; then
+    xz -dc "$FILE" > "$IMG.part"
+    mv "$IMG.part" "$IMG"
+fi
+if [ "$OFFICIAL" = 1 ] && [ "$FRESH" = 0 ]; then
+    echo "$(sha256sum <"$IMG" | awk '{print $1}') $DIETPI_SIGNING_KEY" > "$IMG.verified"
+fi
+exec 8>&-
 
 OUT=${IMG%.img}-$PROFILE_NAME.img
 OUTTMP=$(mktemp "$(dirname "$OUT")/.$(basename "$OUT").XXXXXX")

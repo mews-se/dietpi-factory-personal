@@ -27,6 +27,12 @@ require_uint() {
     [ "$2" -ge "$3" ] && [ "$2" -le "$4" ] || { echo "Error: $1 must be between $3 and $4." >&2; exit 1; }
 }
 
+valid_ipv4() {
+    [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+    local IFS=. o
+    for o in $1; do [ "$o" -le 255 ] || return 1; done
+}
+
 resolve_dietpi_ref() {
     local sha
     sha=$(curl -fsS https://api.github.com/repos/MichaIng/DietPi/commits/master 2>/dev/null | sed -n 's/.*"sha": *"\([0-9a-f]\{40\}\)".*/\1/p' | head -1)
@@ -47,6 +53,14 @@ require_uint "RAM" "$RAM" 128 4194304
 require_uint "disk size" "$DISK" 1 65536
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#CT_HOSTNAME} -le 63 ] || { echo "Error: invalid hostname '$CT_HOSTNAME'." >&2; exit 1; }
 
+# fail early on a taken ID, pct create remains the authoritative check;
+# capture first so grep -q cannot close the pipe early under pipefail
+CLUSTER_GUESTS=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null || true)
+if grep -Eq "\"vmid\":[[:space:]]*${CTID}[,}]" <<< "$CLUSTER_GUESTS"; then
+    echo "Error: ID $CTID is already in use." >&2
+    exit 1
+fi
+
 if [ "$ASSUME_DEFAULTS" = 1 ]; then
     # the storage with the most free space
     STORAGE=$(pvesm status --content rootdir | awk 'NR>1 && $3=="active"' | sort -k6 -n | tail -1 | awk '{print $1}')
@@ -63,71 +77,33 @@ else
     else
         IPCIDR=$(ask "Static IP" "IP address with CIDR (e.g. 10.0.0.50/24):" "")
         GW=$(ask "Gateway" "Gateway:" "")
+        [[ $IPCIDR == */* ]] && valid_ipv4 "${IPCIDR%/*}" && [ "${IPCIDR#*/}" -ge 0 ] 2>/dev/null && [ "${IPCIDR#*/}" -le 32 ] 2>/dev/null || \
+            { echo "Error: the static IP must be address/prefix, e.g. 10.0.0.50/24." >&2; exit 1; }
+        valid_ipv4 "$GW" || { echo "Error: the gateway must be a valid IPv4 address." >&2; exit 1; }
         NET0="name=eth0,bridge=${BRIDGE},ip=${IPCIDR},gw=${GW}"
     fi
 fi
 
-echo "Looking up latest Debian standard template..."
-pveam update >/dev/null
-TEMPLATE=$(pveam available --section system | awk '/debian-1[23]-standard/ {print $2}' | sort -V | tail -1)
-[ -n "$TEMPLATE" ] || { echo "Error: no Debian standard template found via pveam." >&2; exit 1; }
-[ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
-TSTORE=$(pvesm status --content vztmpl | awk 'NR>1 && $3=="active" {print $1; exit}')
-[ -n "$TSTORE" ] || { echo "Error: no active template storage found." >&2; exit 1; }
-# serialize template downloads and accept a concurrent winner
-exec 8>/var/lock/dietpi-factory-template
-flock 8
-if ! pveam list "$TSTORE" 2>/dev/null | awk '{print $1}' | grep -qx "$TSTORE:vztmpl/$TEMPLATE"; then
-    pveam download "$TSTORE" "$TEMPLATE" || pveam list "$TSTORE" 2>/dev/null | awk '{print $1}' | grep -qx "$TSTORE:vztmpl/$TEMPLATE"
-fi
-exec 8>&-
-
-# dietpi-installer aborts without a preset distro when there is no tty
-case $TEMPLATE in
-    *debian-13*) DISTRO_TARGET=8 ;;
-    *debian-12*) DISTRO_TARGET=7 ;;
-    *) echo "Error: cannot map template '$TEMPLATE' to a DietPi distro target." >&2; exit 1 ;;
-esac
-
-echo "Creating container ${CTID} (${CT_HOSTNAME})..."
-pct create "$CTID" "$TSTORE:vztmpl/${TEMPLATE}" \
-    --hostname "$CT_HOSTNAME" \
-    --cores "$CORES" \
-    --memory "$RAM" \
-    --rootfs "${STORAGE}:${DISK}" \
-    --net0 "$NET0" \
-    --unprivileged 1 \
-    --features nesting=1 \
-    --ostype debian \
-    --onboot 1
-
-pct start "$CTID"
-echo "Waiting for network in the container..."
-for _ in $(seq 1 30); do
-    pct exec "$CTID" -- ping -c1 -W1 deb.debian.org >/dev/null 2>&1 && break
-    sleep 2
-done
-
-echo "Converting Debian to DietPi, this takes a while..."
-pct exec "$CTID" -- bash -c "apt-get update && apt-get install -y curl ca-certificates"
-DIETPI_REF=$(resolve_dietpi_ref) || DIETPI_REF=master
-pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/MichaIng/DietPi/${DIETPI_REF}/.build/images/dietpi-installer' -o \"\$I\" && \
-    GITOWNER=MichaIng GITBRANCH=${DIETPI_REF} HW_MODEL=75 DISTRO_TARGET=${DISTRO_TARGET} IMAGE_CREATOR=mews_se \
-    PREIMAGE_INFO='Debian LXC template' WIFI_REQUIRED=0 bash \"\$I\""
-
-# dietpi-software initialises Dropbear as pre-installed although container
-# images never ship it, which makes the first run skip the SSH server.
-# Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
-# the state file itself, so only add the line while master still lacks it
-pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/dietpi/.installed 2>/dev/null || echo "aSOFTWARE_INSTALL_STATE[104]=0" >> /boot/dietpi/.installed'
-
-# the conversion removes ifupdown2 from the template and clears the APT lists
-echo "Installing ifupdown..."
-pct exec "$CTID" -- bash -c "apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown isc-dhcp-client"
-
-echo "Applying profile..."
 TMPD=$(mktemp -d)
-trap 'rm -rf "$TMPD"' EXIT
+CT_CREATED=0 HANDOFF=0
+cleanup() {
+    set +e
+    if [ "$CT_CREATED" = 1 ] && [ "$HANDOFF" = 0 ]; then
+        # a destroy racing the tail end of a failed start can leave the
+        # config behind, verify and retry
+        for _ in 1 2 3; do
+            pct destroy "$CTID" --purge --force >/dev/null 2>&1
+            pct config "$CTID" >/dev/null 2>&1 || break
+            sleep 3
+        done
+        if pct config "$CTID" >/dev/null 2>&1; then
+            echo "Warning: container $CTID could not be removed, inspect with: pct config $CTID" >&2
+        fi
+    fi
+    rm -rf "$TMPD"
+}
+trap cleanup EXIT
+
 if [ -n "$PROFILE_DIR" ]; then
     cp "$PROFILE_DIR/dietpi.txt" "$TMPD/dietpi.txt"
     [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TMPD/Automation_Custom_Script.sh"
@@ -185,11 +161,79 @@ HOOK
 CSEOF
 fi
 
-# validate the whole profile before doing anything destructive
+# validate the whole profile before anything is created or converted
 grep -qE '^[A-Z][A-Z0-9_]*=' "$TMPD/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
 BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$TMPD/dietpi.txt" || true)
 [ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
 
+echo "Looking up latest Debian standard template..."
+pveam update >/dev/null
+# the index also carries foreign architectures, only match the host one
+ARCH=$(dpkg --print-architecture)
+TEMPLATE=$(pveam available --section system | awk -v a="$ARCH" '$2 ~ ("^debian-1[23]-standard_.*_" a "\\.tar") {print $2}' | sort -V | tail -1)
+[ -n "$TEMPLATE" ] || { echo "Error: no Debian standard template found via pveam." >&2; exit 1; }
+[ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
+TSTORE=$(pvesm status --content vztmpl | awk 'NR>1 && $3=="active" {print $1; exit}')
+[ -n "$TSTORE" ] || { echo "Error: no active template storage found." >&2; exit 1; }
+# serialize template downloads and accept a concurrent winner; the list is
+# captured first so grep -q cannot close the pipe early under pipefail
+have_template() {
+    local list
+    list=$(pveam list "$TSTORE" 2>/dev/null | awk '{print $1}')
+    grep -qx "$TSTORE:vztmpl/$TEMPLATE" <<< "$list"
+}
+exec 8>/var/lock/dietpi-factory-template
+flock 8
+if ! have_template; then
+    pveam download "$TSTORE" "$TEMPLATE" || have_template
+fi
+exec 8>&-
+
+# dietpi-installer aborts without a preset distro when there is no tty
+case $TEMPLATE in
+    *debian-13*) DISTRO_TARGET=8 ;;
+    *debian-12*) DISTRO_TARGET=7 ;;
+    *) echo "Error: cannot map template '$TEMPLATE' to a DietPi distro target." >&2; exit 1 ;;
+esac
+
+echo "Creating container ${CTID} (${CT_HOSTNAME})..."
+pct create "$CTID" "$TSTORE:vztmpl/${TEMPLATE}" \
+    --hostname "$CT_HOSTNAME" \
+    --cores "$CORES" \
+    --memory "$RAM" \
+    --rootfs "${STORAGE}:${DISK}" \
+    --net0 "$NET0" \
+    --unprivileged 1 \
+    --features nesting=1 \
+    --ostype debian \
+    --onboot 1
+CT_CREATED=1
+
+pct start "$CTID"
+echo "Waiting for network in the container..."
+for _ in $(seq 1 30); do
+    pct exec "$CTID" -- ping -c1 -W1 deb.debian.org >/dev/null 2>&1 && break
+    sleep 2
+done
+
+echo "Converting Debian to DietPi, this takes a while..."
+pct exec "$CTID" -- bash -c "apt-get update && apt-get install -y curl ca-certificates"
+DIETPI_REF=$(resolve_dietpi_ref) || DIETPI_REF=master
+pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/MichaIng/DietPi/${DIETPI_REF}/.build/images/dietpi-installer' -o \"\$I\" && \
+    GITOWNER=MichaIng GITBRANCH=${DIETPI_REF} HW_MODEL=75 DISTRO_TARGET=${DISTRO_TARGET} IMAGE_CREATOR=mews_se \
+    PREIMAGE_INFO='Debian LXC template' WIFI_REQUIRED=0 bash \"\$I\""
+
+# dietpi-software initialises Dropbear as pre-installed although container
+# images never ship it, which makes the first run skip the SSH server.
+# Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
+# the state file itself, so only add the line while master still lacks it
+pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/dietpi/.installed 2>/dev/null || echo "aSOFTWARE_INSTALL_STATE[104]=0" >> /boot/dietpi/.installed'
+
+# the conversion removes ifupdown2 from the template and clears the APT lists
+echo "Installing ifupdown..."
+pct exec "$CTID" -- bash -c "apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown isc-dhcp-client"
+
+echo "Applying profile..."
 # the installer ships the stock dietpi.txt, so drop its copies of the profile
 # keys and append ours (DietPi reads the first match)
 pct push "$CTID" "$TMPD/dietpi.txt" /boot/dietpi-factory.txt
@@ -203,6 +247,8 @@ pct exec "$CTID" -- bash -c '
     { echo; grep -E '^[A-Z][A-Z0-9_]*=' /boot/dietpi-factory.txt; } >> /boot/dietpi.txt
     rm /boot/dietpi-factory.txt'
 
+# from here the container is handed over, keep it even if the restart fails
+HANDOFF=1
 # pct reboot right after the conversion does not take effect, stop/start does
 echo "Restarting container..."
 pct stop "$CTID"

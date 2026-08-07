@@ -62,6 +62,14 @@ require_uint "RAM" "$RAM" 128 4194304
 require_uint "disk size" "$DISK" 1 65536
 [[ $VM_NAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#VM_NAME} -le 63 ] || { echo "Error: invalid VM name '$VM_NAME'." >&2; exit 1; }
 
+# fail early on a taken ID, qm create remains the authoritative check;
+# capture first so grep -q cannot close the pipe early under pipefail
+CLUSTER_GUESTS=$(pvesh get /cluster/resources --type vm --output-format json 2>/dev/null || true)
+if grep -Eq "\"vmid\":[[:space:]]*${VMID}[,}]" <<< "$CLUSTER_GUESTS"; then
+    echo "Error: ID $VMID is already in use." >&2
+    exit 1
+fi
+
 if [ "$ASSUME_DEFAULTS" = 1 ]; then
     # the active storage with the most free space
     STORAGE=$(pvesm status --content images | awk 'NR>1 && $3=="active"' | sort -k6 -n | tail -1 | awk '{print $1}')
@@ -84,9 +92,16 @@ mkdir -p "$CACHE"
 QCOW2=$CACHE/${IMAGE%.xz}
 exec 8>"$CACHE/.download.lock"
 flock 8
-if [ ! -f "$QCOW2" ]; then
+# a cache entry is only trusted with the receipt of a passed verification,
+# entries from before the signature gate or modified since are rebuilt
+CACHED=0
+if [ -f "$QCOW2" ] && [ -f "$QCOW2.verified" ] && \
+    [ "$(sha256sum <"$QCOW2" | awk '{print $1}') $DIETPI_SIGNING_KEY" = "$(cat "$QCOW2.verified")" ]; then
+    CACHED=1
+fi
+if [ "$CACHED" = 0 ]; then
     echo "Downloading ${IMAGE}..."
-    rm -f "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
+    rm -f "$QCOW2" "$QCOW2.verified" "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
     curl -fL -o "$CACHE/$IMAGE" "$BASE_URL/$IMAGE"
     curl -fsL -o "$CACHE/$IMAGE.sha256" "$BASE_URL/$IMAGE.sha256"
     curl -fsL -o "$CACHE/$IMAGE.asc" "$BASE_URL/$IMAGE.asc"
@@ -94,6 +109,7 @@ if [ ! -f "$QCOW2" ]; then
     verify_signature "$CACHE/$IMAGE"
     xz -dc "$CACHE/$IMAGE" > "$QCOW2.part"
     mv "$QCOW2.part" "$QCOW2"
+    echo "$(sha256sum <"$QCOW2" | awk '{print $1}') $DIETPI_SIGNING_KEY" > "$QCOW2.verified"
 fi
 exec 8>&-
 
@@ -110,7 +126,14 @@ cleanup() {
     [ "$MOUNTED" = 1 ] && umount "$MNT"
     [ "$NBD_CONNECTED" = 1 ] && qemu-nbd --disconnect "$NBD" >/dev/null 2>&1
     if [ "$VM_CREATED" = 1 ] && [ "$HANDOFF" = 0 ]; then
-        qm destroy "$VMID" --purge >/dev/null 2>&1
+        for _ in 1 2 3; do
+            qm destroy "$VMID" --purge >/dev/null 2>&1
+            qm config "$VMID" >/dev/null 2>&1 || break
+            sleep 3
+        done
+        if qm config "$VMID" >/dev/null 2>&1; then
+            echo "Warning: VM $VMID could not be removed, inspect with: qm config $VMID" >&2
+        fi
     fi
     rm -f "$WORK"
     rm -rf "$TMPD"
@@ -239,31 +262,32 @@ exec 9>&-
 
 ##### Create and start the VM #####
 echo "Creating VM ${VMID} (${VM_NAME})..."
-UEFI_ARGS=()
-# keys pre-enrolled, the images ship the signed Debian boot chain
-[ "$UEFI" = 0 ] || UEFI_ARGS=(--machine q35 --bios ovmf --efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=1")
+# create the bare config first and attach storage afterwards: when the create
+# fails, typically on a taken ID, nothing of ours exists yet and nothing is
+# removed. The cleanup trap only ever destroys a VM this run created itself.
 if ! qm create "$VMID" \
     --name "$VM_NAME" \
     --cores "$CORES" \
     --memory "$RAM" \
     --net0 "virtio,bridge=${BRIDGE}" \
     --scsihw virtio-scsi-pci \
-    --scsi0 "${STORAGE}:0,import-from=${WORK},discard=on,ssd=1" \
     --boot order=scsi0 \
     --ostype l26 \
     --onboot 1 \
-    "${UEFI_ARGS[@]}" \
     --description "<p align='center'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='40'><br><strong>DietPi</strong><br><a href='https://dietpi.com/docs/'>Docs</a> - <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a></p>"
 then
-    # a partial create can leave a config behind, remove it if it is ours
-    qm destroy "$VMID" --purge >/dev/null 2>&1 || true
-    echo "Error: qm create failed." >&2
+    echo "Error: qm create failed, is ID $VMID already in use?" >&2
     exit 1
 fi
 VM_CREATED=1
+# keys pre-enrolled, the images ship the signed Debian boot chain
+[ "$UEFI" = 0 ] || qm set "$VMID" --machine q35 --bios ovmf --efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=1"
+qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${WORK},discard=on,ssd=1"
 
-# the image is 8 GiB virtual, only grow when a larger disk was requested
-CUR_BYTES=$(qemu-img info --output=json "$QCOW2" | sed -n 's/.*"virtual-size": *\([0-9]*\).*/\1/p')
+# the image is 8 GiB virtual, only grow when a larger disk was requested;
+# newer qemu-img repeats virtual-size for child nodes in the json output,
+# the human readable line is the one that stays unique
+CUR_BYTES=$(qemu-img info "$QCOW2" | sed -n 's/^virtual size:.*(\([0-9]*\) bytes).*/\1/p')
 if [ "$(( DISK * 1024*1024*1024 ))" -gt "${CUR_BYTES:-0}" ]; then
     qm disk resize "$VMID" scsi0 "${DISK}G"
 fi
