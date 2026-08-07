@@ -63,6 +63,13 @@ else
     curl -fsSL "$PROFILE_URL/Automation_Custom_Script.sh" -o "$TMPD/Automation_Custom_Script.sh"
 fi
 
+# a profile saved with Windows line endings would ride a stray \r into
+# every value, DietPi applies them verbatim
+if grep -q $'\r' "$TMPD/dietpi.txt"; then
+    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+    exit 1
+fi
+
 # upstream treats the key as an URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
 CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
@@ -114,6 +121,10 @@ GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO
     IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer
 rm -f "$TMPD"/dietpi-installer
 
+# the installer stamps the pinned SHA as the permanent dietpi-update target,
+# which would freeze updates at this commit, point updates back at master
+sed -i 's/^DEV_GITBRANCH=.*/DEV_GITBRANCH=master/' /boot/dietpi.txt
+
 # dietpi-software initialises Dropbear as pre-installed although containers
 # never ship it, which makes the first run skip the SSH server.
 # Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
@@ -122,16 +133,10 @@ if [ "$HW_MODEL" = 75 ]; then
     grep -q 'aSOFTWARE_INSTALL_STATE\[104\]=' /boot/dietpi/.installed 2>/dev/null || echo 'aSOFTWARE_INSTALL_STATE[104]=0' >> /boot/dietpi/.installed
 fi
 
-# the conversion can remove the network stack that was in use (ifupdown2,
-# netplan, cloud-init) and clears the APT lists, so make sure ifupdown and a
-# DHCP client are there for the reboot
-DHCP_PKG=isc-dhcp-client
-[ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
-apt-get update -q
-DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown "$DHCP_PKG"
-
 # the installer ships the stock dietpi.txt, so drop its copies of the profile
-# keys and append ours (DietPi reads the first match)
+# keys and append ours (DietPi reads the first match); profile and SSH key go
+# in before anything that needs the network again, a failure further down
+# must not leave the machine unconfigured or unreachable
 while IFS= read -r line; do
     [[ $line =~ ^[A-Z][A-Z0-9_]*= ]] || continue
     key=${line%%=*}
@@ -155,6 +160,17 @@ if [ -n "$pubkey" ]; then
     chmod 700 /root/.ssh
     grep -qsF "$pubkey" /root/.ssh/authorized_keys || echo "$pubkey" >> /root/.ssh/authorized_keys
     chmod 600 /root/.ssh/authorized_keys
+fi
+
+# the conversion can remove the network stack that was in use (ifupdown2,
+# netplan, cloud-init) and clears the APT lists, so make sure ifupdown and a
+# DHCP client are there for the reboot
+DHCP_PKG=isc-dhcp-client
+[ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
+if ! { apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown "$DHCP_PKG"; }; then
+    echo "Error: could not install ifupdown and $DHCP_PKG. Do not reboot yet, the" >&2
+    echo "network would not come back. Fix APT and install them manually first." >&2
+    exit 1
 fi
 
 

@@ -1,2 +1,4 @@
 # Generated profiles can contain passwords and SSH keys - never commit them
 profiles/
+# Baked images embed the profile password and keys
+build/

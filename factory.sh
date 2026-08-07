@@ -50,8 +50,10 @@ valid_netmask() {
     valid_ipv4 "$1" || return 1
     local IFS=. o m=0
     for o in $1; do m=$(( (m << 8) | o )); done
-    # the ones must be contiguous from the top
+    # the ones must be contiguous from the top; /0 and /32 pass that test
+    # but make no sense with the gateway the wizard always requires
     local inv=$(( ~m & 4294967295 ))
+    (( m != 0 && inv != 0 )) || return 1
     (( (inv & (inv + 1)) == 0 ))
 }
 
@@ -85,10 +87,14 @@ DEFAULT_PUBKEY_FILE=""
 for f in "$HOME"/.ssh/id_ed25519.pub "$HOME"/.ssh/id_rsa.pub; do
     [ -r "$f" ] && { DEFAULT_PUBKEY_FILE=$f; break; }
 done
-PUBKEY_INPUT=$(ask "SSH key" "Public key (path to .pub file, pasted key, or empty to skip):" "$DEFAULT_PUBKEY_FILE")
+PUBKEY_INPUT=$(ask "SSH key" "Public key (path to .pub file, pasted key, 'none' or empty to skip):" "$DEFAULT_PUBKEY_FILE")
 SSH_PUBKEY=""
-if [ -r "$PUBKEY_INPUT" ]; then
-    SSH_PUBKEY=$(head -n1 "$PUBKEY_INPUT")
+if [ "$PUBKEY_INPUT" = none ]; then
+    # plain prompts cannot answer empty over a default, 'none' skips
+    :
+elif [ -r "$PUBKEY_INPUT" ]; then
+    # a CRLF .pub file would put a stray \r in the key line
+    SSH_PUBKEY=$(head -n1 "$PUBKEY_INPUT" | tr -d '\r')
 elif [ -n "$PUBKEY_INPUT" ]; then
     # a key line always contains a space, a path practically never does;
     # accept complete authorized_keys lines including options and sk- types

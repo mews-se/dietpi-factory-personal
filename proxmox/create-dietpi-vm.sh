@@ -9,6 +9,9 @@
 # directory as first argument (or PROFILE_DIR) to use it instead of the
 # embedded defaults. ASSUME_DEFAULTS=1 skips all dialogs.
 set -euo pipefail
+# the working copy carries the injected password until the import finishes,
+# nothing this script writes is for other users to read
+umask 077
 
 BASE_URL=https://dietpi.com/downloads/images
 CACHE=/var/cache/dietpi-factory
@@ -91,9 +94,11 @@ esac
 
 ##### Base image cache, checksum gated and never modified #####
 mkdir -p "$CACHE"
+chmod 700 "$CACHE"
 QCOW2=$CACHE/${IMAGE%.xz}
 exec 8>"$CACHE/.download.lock"
-flock 8
+chmod 600 "$CACHE/.download.lock"
+flock -w 3600 8 || { echo "Error: timed out waiting for a concurrent download." >&2; exit 1; }
 # a cache entry is only trusted with the receipt of a passed verification,
 # entries from before the signature gate or modified since are rebuilt
 CACHED=0
@@ -164,9 +169,15 @@ SURVEY_OPTED_IN=1
 CONFIG_NTP_MIRROR=sth1.ntp.se
 EOF
     echo "AUTO_SETUP_NET_HOSTNAME=$VM_NAME" >> "$TMPD/dietpi.txt"
+    # kept byte-identical with config/Automation_Custom_Script.sh and the
+    # create-dietpi-lxc.sh copy
     cat > "$TMPD/Automation_Custom_Script.sh" <<'CSEOF'
 #!/bin/bash
+# Runs once at the end of DietPi's automated first boot when copied to /boot.
 set -euo pipefail
+
+exec > >(tee -a /var/tmp/dietpi-factory-firstboot.log) 2>&1
+
 # a transient mirror hiccup should not fail the whole first boot
 for i in 1 2 3; do
     if apt-get update && apt-get install -y git; then break; fi
@@ -207,6 +218,13 @@ HOOK
 CSEOF
 fi
 
+# a profile saved with Windows line endings would ride a stray \r into
+# every value, DietPi applies them verbatim
+if grep -q $'\r' "$TMPD/dietpi.txt"; then
+    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+    exit 1
+fi
+
 # upstream treats the key as an URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
 CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
@@ -226,10 +244,19 @@ mapfile -t PROFILE_LINES < <(grep -E '^[A-Z][A-Z0-9_]*=' "$TMPD/dietpi.txt" || t
 BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$TMPD/dietpi.txt" || true)
 [ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
 
-# serialize nbd allocation between concurrent runs
-exec 9>/var/lock/dietpi-factory-nbd
-flock 9
+# serialize nbd allocation between concurrent runs; the lock lives in the
+# root-owned cache dir with a timeout, a lock file in the world-writable
+# /var/lock can be held forever by any local user
+exec 9>"$CACHE/.nbd.lock"
+chmod 600 "$CACHE/.nbd.lock"
+flock -w 600 9 || { echo "Error: timed out waiting for a concurrent profile injection." >&2; exit 1; }
 modprobe nbd max_part=8
+# the modprobe does not change an already loaded module, and without
+# partition support the image partitions never appear
+if [ "$(cat /sys/module/nbd/parameters/max_part 2>/dev/null)" = 0 ]; then
+    echo "Error: the nbd module is loaded with max_part=0, reload it: rmmod nbd && modprobe nbd max_part=8" >&2
+    exit 1
+fi
 NBD=
 for d in /sys/class/block/nbd[0-9]*; do
     [ -s "$d/pid" ] || { NBD=/dev/$(basename "$d"); break; }
@@ -238,7 +265,7 @@ done
 
 qemu-nbd --connect="$NBD" "$WORK"
 NBD_CONNECTED=1
-partprobe "$NBD" 2>/dev/null
+partprobe "$NBD" 2>/dev/null || true
 sleep 1
 
 shopt -s nullglob
@@ -298,16 +325,18 @@ VM_CREATED=1
 [ "$UEFI" = 0 ] || qm set "$VMID" --machine q35 --bios ovmf --efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=1"
 qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${WORK},discard=on,ssd=1"
 
+# from here the VM is complete and handed over, keep it even if the resize
+# or the start fails, it boots fine at the image size
+HANDOFF=1
+
 # the image is 8 GiB virtual, only grow when a larger disk was requested;
 # newer qemu-img repeats virtual-size for child nodes in the json output,
 # the human readable line is the one that stays unique
 CUR_BYTES=$(qemu-img info "$QCOW2" | sed -n 's/^virtual size:.*(\([0-9]*\) bytes).*/\1/p')
 if [ "$(( DISK * 1024*1024*1024 ))" -gt "${CUR_BYTES:-0}" ]; then
-    qm disk resize "$VMID" scsi0 "${DISK}G"
+    qm disk resize "$VMID" scsi0 "${DISK}G" || \
+        echo "Warning: could not grow the disk, the VM keeps the image size. Grow it later with: qm disk resize $VMID scsi0 ${DISK}G" >&2
 fi
-
-# from here the VM is handed over, keep it even if the start fails
-HANDOFF=1
 if ! qm start "$VMID"; then
     echo "The VM was created but failed to start. Inspect with: qm config $VMID" >&2
     exit 1

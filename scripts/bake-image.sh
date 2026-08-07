@@ -10,6 +10,7 @@
 set -euo pipefail
 
 BASE_URL=https://dietpi.com/downloads/images
+CACHE=/var/cache/dietpi-factory
 SRC=${1:-}
 PROFILE_DIR=${2:-$(dirname "$0")/../config}
 
@@ -19,6 +20,13 @@ command -v xz >/dev/null 2>&1 || { echo "Error: xz not found, install xz-utils."
 [ -r "$PROFILE_DIR/dietpi.txt" ] || { echo "Error: no dietpi.txt in '$PROFILE_DIR'." >&2; exit 1; }
 PROFILE_DIR=$(cd "$PROFILE_DIR" && pwd)
 PROFILE_NAME=$(basename "$PROFILE_DIR")
+
+# a profile saved with Windows line endings would ride a stray \r into
+# every value, DietPi applies them verbatim
+if grep -q $'\r' "$PROFILE_DIR/dietpi.txt"; then
+    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+    exit 1
+fi
 
 # validate the whole profile before any work
 grep -qE '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
@@ -85,6 +93,11 @@ else
     URL=$BASE_URL/$(pick_image "$SRC")
 fi
 
+# downloads and verification receipts live in a root-owned cache dir:
+# receipts in the invoking user's build/ could be planted along a matching
+# image to skip the checksum and signature checks entirely
+mkdir -p "$CACHE"
+chmod 700 "$CACHE"
 mkdir -p build
 cd build
 
@@ -92,13 +105,14 @@ OFFICIAL=0
 [ -z "$FILE" ] && [[ $URL == "$BASE_URL"/* ]] && OFFICIAL=1
 
 if [ -z "$FILE" ]; then
-    FILE=$PWD/$(basename "$URL")
-    exec 8>.download.lock
-    flock 8
+    FILE=$CACHE/$(basename "$URL")
+    exec 8>"$CACHE/.download.lock"
+    chmod 600 "$CACHE/.download.lock"
+    flock -w 3600 8 || { echo "Error: timed out waiting for a concurrent download." >&2; exit 1; }
 fi
 
 case $FILE in
-    *.img.xz) IMG=$PWD/$(basename "${FILE%.xz}") ;;
+    *.img.xz) IMG=$CACHE/$(basename "${FILE%.xz}") ;;
     *.img)    IMG=$FILE ;;
     *) echo "Error: expected a .img or .img.xz file." >&2; exit 1 ;;
 esac
@@ -113,6 +127,12 @@ if [ "$OFFICIAL" = 1 ]; then
     if [ -f "$IMG" ] && [ -f "$IMG.verified" ] && \
         [ "$(sha256sum <"$IMG" | awk '{print $1}') $DIETPI_SIGNING_KEY" = "$(cat "$IMG.verified")" ]; then
         FRESH=1
+    fi
+    # a replaced or missing archive voids the receipt: the rebind below would
+    # otherwise unpack the new archive over the verified image unchecked
+    if [ "$FRESH" = 1 ] && [ "$FILE" != "$IMG" ] && \
+        { [ ! -f "$FILE" ] || [ "$(cat "$IMG.src" 2>/dev/null)" != "$FILE $(sha256sum <"$FILE" | awk '{print $1}')" ]; }; then
+        FRESH=0
     fi
     if [ "$FRESH" = 0 ]; then
         echo "Downloading $(basename "$URL")..."
@@ -162,7 +182,7 @@ if [ "$FILE" != "$IMG" ]; then
     # the same name must not keep feeding the old unpacked image
     XZ_SRC="$FILE $(sha256sum <"$FILE" | awk '{print $1}')"
     if [ ! -f "$IMG" ] || [ "$(cat "$IMG.src" 2>/dev/null)" != "$XZ_SRC" ]; then
-        require_space "$PWD" "$(xz --robot --list "$FILE" | awk '$1=="totals" {print $5}')"
+        require_space "$CACHE" "$(xz --robot --list "$FILE" | awk '$1=="totals" {print $5}')"
         trap 'rm -f "$IMG.part"' EXIT
         xz -dc "$FILE" > "$IMG.part"
         mv "$IMG.part" "$IMG"
@@ -211,7 +231,9 @@ while IFS= read -r line; do
     key=${line%%=*}
     sed -i "/^${key}=/d;/^#${key}=/d" "$TARGET/dietpi.txt"
 done < "$PROFILE_DIR/dietpi.txt"
-{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" | grep -vx 'AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1'; } >> "$TARGET/dietpi.txt"
+# the filter may leave nothing to append when the legacy line was the only
+# key, that is not an error
+{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" | grep -vx 'AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1' || true; } >> "$TARGET/dietpi.txt"
 [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TARGET/Automation_Custom_Script.sh"
 
 # make the very first time sync use the profile mirror as well; only doable
