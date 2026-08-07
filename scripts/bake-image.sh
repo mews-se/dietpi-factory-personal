@@ -15,9 +15,32 @@ PROFILE_DIR=${2:-$(dirname "$0")/../config}
 
 [ "$(uname)" = Linux ] || { echo "Error: needs Linux for loop mounts." >&2; exit 1; }
 [ "$EUID" -eq 0 ] || { echo "Error: run as root." >&2; exit 1; }
+command -v xz >/dev/null 2>&1 || { echo "Error: xz not found, install xz-utils." >&2; exit 1; }
 [ -r "$PROFILE_DIR/dietpi.txt" ] || { echo "Error: no dietpi.txt in '$PROFILE_DIR'." >&2; exit 1; }
 PROFILE_DIR=$(cd "$PROFILE_DIR" && pwd)
 PROFILE_NAME=$(basename "$PROFILE_DIR")
+
+# validate the whole profile before any work
+grep -qE '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
+BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$PROFILE_DIR/dietpi.txt" || true)
+[ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
+# upstream treats the key as an URL field and a bundled script runs on file
+# presence alone, hence ignore a legacy boolean or refuse it without a script
+CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$PROFILE_DIR/dietpi.txt")
+if [ "$CSX" = 1 ]; then
+    if [ -r "$PROFILE_DIR/Automation_Custom_Script.sh" ]; then
+        echo "Note: ignoring legacy AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1, the bundled script runs on its own."
+    else
+        echo "Error: AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1 is not a valid URL and the profile has no Automation_Custom_Script.sh." >&2
+        exit 1
+    fi
+fi
+
+require_space() {
+    local avail
+    avail=$(df -B1 --output=avail "$1" | tail -1)
+    (( avail > $2 + 104857600 )) || { echo "Error: not enough free space in $1, need $(( ($2 + 104857600) / 1048576 )) MiB, $(( avail / 1048576 )) MiB available." >&2; exit 1; }
+}
 
 pick_image() {
     local matches
@@ -45,8 +68,10 @@ verify_signature() {
     local gnupg_tmp status
     gnupg_tmp=$(mktemp -d)
     chmod 700 "$gnupg_tmp"
-    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg -q --import 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not import the DietPi signing key." >&2; exit 1; }
-    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --verify "$1.asc" "$1" 2>/dev/null) || true
+    # a plain keyring file needs neither an import nor the gpg-agent that
+    # minimal systems lack
+    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg --dearmor > "$gnupg_tmp/key.gpg" 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not fetch the DietPi signing key." >&2; exit 1; }
+    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --no-default-keyring --keyring "$gnupg_tmp/key.gpg" --verify "$1.asc" "$1" 2>/dev/null) || true
     rm -rf "$gnupg_tmp"
     grep -q "^\[GNUPG:\] VALIDSIG $DIETPI_SIGNING_KEY " <<< "$status" || { echo "Error: GPG signature verification failed for $(basename "$1")." >&2; exit 1; }
 }
@@ -73,7 +98,7 @@ if [ -z "$FILE" ]; then
 fi
 
 case $FILE in
-    *.img.xz) IMG=${FILE%.xz} ;;
+    *.img.xz) IMG=$PWD/$(basename "${FILE%.xz}") ;;
     *.img)    IMG=$FILE ;;
     *) echo "Error: expected a .img or .img.xz file." >&2; exit 1 ;;
 esac
@@ -132,16 +157,26 @@ elif [ -n "${URL:-}" ]; then
     fi
 fi
 
-if [ "$FILE" != "$IMG" ] && [ ! -f "$IMG" ]; then
-    xz -dc "$FILE" > "$IMG.part"
-    mv "$IMG.part" "$IMG"
+if [ "$FILE" != "$IMG" ]; then
+    # bind the unpacked copy to its source archive: a replaced archive with
+    # the same name must not keep feeding the old unpacked image
+    XZ_SRC="$FILE $(sha256sum <"$FILE" | awk '{print $1}')"
+    if [ ! -f "$IMG" ] || [ "$(cat "$IMG.src" 2>/dev/null)" != "$XZ_SRC" ]; then
+        require_space "$PWD" "$(xz --robot --list "$FILE" | awk '$1=="totals" {print $5}')"
+        trap 'rm -f "$IMG.part"' EXIT
+        xz -dc "$FILE" > "$IMG.part"
+        mv "$IMG.part" "$IMG"
+        trap - EXIT
+        echo "$XZ_SRC" > "$IMG.src"
+    fi
 fi
 if [ "$OFFICIAL" = 1 ] && [ "$FRESH" = 0 ]; then
     echo "$(sha256sum <"$IMG" | awk '{print $1}') $DIETPI_SIGNING_KEY" > "$IMG.verified"
 fi
 exec 8>&-
 
-OUT=${IMG%.img}-$PROFILE_NAME.img
+# the output always lands under build/, also for local source files elsewhere
+OUT=$PWD/$(basename "${IMG%.img}")-$PROFILE_NAME.img
 OUTTMP=$(mktemp "$(dirname "$OUT")/.$(basename "$OUT").XXXXXX")
 LOOP='' MOUNTED=0
 cleanup() {
@@ -152,17 +187,13 @@ cleanup() {
     rm -f "$OUTTMP"
 }
 trap cleanup EXIT
-cp "$IMG" "$OUTTMP"
+require_space "$PWD" "$(stat -c %s "$IMG")"
+cp --reflink=auto --sparse=always "$IMG" "$OUTTMP"
 LOOP=$(losetup -fP --show "$OUTTMP")
 MNT=$(mktemp -d)
 
 # dietpi.txt sits on the boot partition on SBC images and in /boot on the
 # rootfs on PC images, container images have no partition table at all
-# validate the whole profile before doing anything destructive
-grep -qE '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" || { echo "Error: the profile contains no valid KEY=value lines." >&2; exit 1; }
-BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$PROFILE_DIR/dietpi.txt" || true)
-[ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
-
 shopt -s nullglob
 TARGET=
 for part in "$LOOP"p* "$LOOP"; do
@@ -180,7 +211,7 @@ while IFS= read -r line; do
     key=${line%%=*}
     sed -i "/^${key}=/d;/^#${key}=/d" "$TARGET/dietpi.txt"
 done < "$PROFILE_DIR/dietpi.txt"
-{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt"; } >> "$TARGET/dietpi.txt"
+{ echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" | grep -vx 'AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1'; } >> "$TARGET/dietpi.txt"
 [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TARGET/Automation_Custom_Script.sh"
 
 # make the very first time sync use the profile mirror as well; only doable

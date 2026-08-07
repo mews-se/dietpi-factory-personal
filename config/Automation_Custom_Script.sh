@@ -1,6 +1,5 @@
 #!/bin/bash
-# Runs once at the end of DietPi's automated first boot
-# (AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1 in dietpi.txt).
+# Runs once at the end of DietPi's automated first boot when copied to /boot.
 set -euo pipefail
 
 exec > >(tee -a /var/tmp/dietpi-factory-firstboot.log) 2>&1

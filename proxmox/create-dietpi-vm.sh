@@ -41,8 +41,10 @@ verify_signature() {
     local gnupg_tmp status
     gnupg_tmp=$(mktemp -d)
     chmod 700 "$gnupg_tmp"
-    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg -q --import 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not import the DietPi signing key." >&2; exit 1; }
-    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --verify "$1.asc" "$1" 2>/dev/null) || true
+    # a plain keyring file needs neither an import nor the gpg-agent that
+    # minimal systems lack
+    curl -fsL https://github.com/MichaIng.gpg | GNUPGHOME=$gnupg_tmp gpg --dearmor > "$gnupg_tmp/key.gpg" 2>/dev/null || { rm -rf "$gnupg_tmp"; echo "Error: could not fetch the DietPi signing key." >&2; exit 1; }
+    status=$(GNUPGHOME=$gnupg_tmp gpg --status-fd 1 --no-default-keyring --keyring "$gnupg_tmp/key.gpg" --verify "$1.asc" "$1" 2>/dev/null) || true
     rm -rf "$gnupg_tmp"
     grep -q "^\[GNUPG:\] VALIDSIG $DIETPI_SIGNING_KEY " <<< "$status" || { echo "Error: GPG signature verification failed for $(basename "$1")." >&2; exit 1; }
 }
@@ -158,7 +160,6 @@ AUTO_SETUP_AUTOSTART_TARGET_INDEX=0
 AUTO_SETUP_SSH_SERVER_INDEX=-2
 AUTO_SETUP_AUTOMATED=1
 AUTO_SETUP_GLOBAL_PASSWORD=dietpi
-AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1
 SURVEY_OPTED_IN=1
 CONFIG_NTP_MIRROR=sth1.ntp.se
 EOF
@@ -204,6 +205,19 @@ if [ -n "${PS1:-}" ] && [ "$(id -u)" -ne 0 ] && [ ! -e /var/local/hostctl-firstl
 fi
 HOOK
 CSEOF
+fi
+
+# upstream treats the key as an URL field and a bundled script runs on file
+# presence alone, hence drop a legacy boolean or refuse it without a script
+CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
+if [ "$CSX" = 1 ]; then
+    if [ -r "$TMPD/Automation_Custom_Script.sh" ]; then
+        echo "Note: dropping legacy AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1, the bundled script runs on its own."
+        sed -i '/^AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1[[:blank:]]*$/d' "$TMPD/dietpi.txt"
+    else
+        echo "Error: AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1 is not a valid URL and the profile has no Automation_Custom_Script.sh." >&2
+        exit 1
+    fi
 fi
 
 # validate the whole profile before touching anything

@@ -120,7 +120,6 @@ AUTO_SETUP_AUTOSTART_TARGET_INDEX=0
 AUTO_SETUP_SSH_SERVER_INDEX=-2
 AUTO_SETUP_AUTOMATED=1
 AUTO_SETUP_GLOBAL_PASSWORD=dietpi
-AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1
 SURVEY_OPTED_IN=1
 CONFIG_NTP_MIRROR=sth1.ntp.se
 EOF
@@ -159,6 +158,19 @@ if [ -n "\${PS1:-}" ] && [ "\$(id -u)" -ne 0 ] && [ ! -e /var/local/hostctl-firs
 fi
 HOOK
 CSEOF
+fi
+
+# upstream treats the key as an URL field and a bundled script runs on file
+# presence alone, hence drop a legacy boolean or refuse it without a script
+CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
+if [ "$CSX" = 1 ]; then
+    if [ -r "$TMPD/Automation_Custom_Script.sh" ]; then
+        echo "Note: dropping legacy AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1, the bundled script runs on its own."
+        sed -i '/^AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1[[:blank:]]*$/d' "$TMPD/dietpi.txt"
+    else
+        echo "Error: AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1 is not a valid URL and the profile has no Automation_Custom_Script.sh." >&2
+        exit 1
+    fi
 fi
 
 # validate the whole profile before anything is created or converted
