@@ -40,6 +40,64 @@ askpw() {
     fi
 }
 
+menu() {
+    local title=$1 text=$2 default=$3
+    shift 3
+    whiptail --backtitle "dietpi-factory" --title "$title" --menu "$text" 22 74 14 --default-item "$default" "$@" 3>&1 1>&2 2>&3
+}
+
+# the three fields below need exact system values few people know by heart:
+# offer menus built from the system's own data files where possible, and
+# validate free text against the same files with a pointer to them
+
+pick_timezone() {
+    # zone.tab keeps one zone per country; zone1970.tab merged e.g. all of
+    # CET into Europe/Berlin and would hide the zones people look for
+    local tab=/usr/share/zoneinfo/zone.tab z
+    [ -r "$tab" ] || tab=/usr/share/zoneinfo/zone1970.tab
+    if [ "$HAVE_WHIPTAIL" -eq 1 ] && [ -r "$tab" ]; then
+        local regions=() zones=() region
+        while read -r z; do regions+=("$z" ""); done < <({ awk '!/^#/ {split($3,a,"/"); print a[1]}' "$tab"; echo UTC; } | sort -u)
+        region=$(menu "Timezone" "Region:" "${1%%/*}" "${regions[@]}")
+        [ "$region" = UTC ] && { TIMEZONE=UTC; return; }
+        while read -r z; do zones+=("$z" ""); done < <(awk -v r="$region/" '!/^#/ && index($3,r)==1 {print $3}' "$tab" | sort -u)
+        TIMEZONE=$(menu "Timezone" "Zone:" "$1" "${zones[@]}")
+    else
+        TIMEZONE=$(ask "Timezone" "Timezone (e.g. $1):" "$1")
+    fi
+    [ -f "/usr/share/zoneinfo/$TIMEZONE" ] || { echo "Error: unknown timezone '$TIMEZONE'. List them with 'timedatectl list-timezones' or 'ls /usr/share/zoneinfo'." >&2; exit 1; }
+}
+
+pick_keyboard() {
+    local lst=/usr/share/X11/xkb/rules/base.lst code name
+    if [ "$HAVE_WHIPTAIL" -eq 1 ] && [ -r "$lst" ]; then
+        local opts=()
+        while read -r code name; do [ -n "$code" ] && opts+=("$code" "$name"); done < <(sed -n '/^! layout/,/^!/p' "$lst" | sed '1d;/^!/d;/^$/d' | sort)
+        KEYBOARD=$(menu "Keyboard" "Keyboard layout:" "$1" "${opts[@]}")
+    else
+        KEYBOARD=$(ask "Keyboard" "Keyboard layout (e.g. us, gb, se, de):" "$1")
+        if [ -r "$lst" ]; then
+            sed -n '/^! layout/,/^!/p' "$lst" | awk -v k="$KEYBOARD" '$1==k {found=1} END {exit !found}' || \
+                { echo "Error: unknown keyboard layout '$KEYBOARD'. The valid codes are in the '! layout' section of $lst." >&2; exit 1; }
+        fi
+    fi
+}
+
+pick_locale() {
+    local sup=/usr/share/i18n/SUPPORTED l
+    if [ "$HAVE_WHIPTAIL" -eq 1 ] && [ -r "$sup" ]; then
+        local opts=()
+        while read -r l; do opts+=("$l" ""); done < <({ echo C.UTF-8; awk '$2=="UTF-8" {print $1}' "$sup"; } | sort -u)
+        LOCALE=$(menu "Locale" "Locale (UTF-8 recommended):" "$1" "${opts[@]}")
+    else
+        LOCALE=$(ask "Locale" "Locale (e.g. $1, C.UTF-8):" "$1")
+    fi
+    if [ "$LOCALE" != C.UTF-8 ] && [ -r "$sup" ]; then
+        awk -v l="$LOCALE" '$1==l {found=1} END {exit !found}' "$sup" || \
+            { echo "Error: unknown locale '$LOCALE'. The valid ones are listed in $sup." >&2; exit 1; }
+    fi
+}
+
 valid_ipv4() {
     [[ $1 =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
     local IFS=. o
@@ -63,9 +121,9 @@ case $PROFILE in *[!A-Za-z0-9._-]*|.|..) echo "Error: profile name may only cont
 
 CT_HOSTNAME=$(ask "Hostname" "Hostname:" "dietpi")
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#CT_HOSTNAME} -le 63 ] || { echo "Error: invalid hostname '$CT_HOSTNAME'." >&2; exit 1; }
-TIMEZONE=$(ask "Timezone" "Timezone:" "Europe/Stockholm")
-KEYBOARD=$(ask "Keyboard" "Keyboard layout:" "se")
-LOCALE=$(ask "Locale" "Locale:" "en_US.UTF-8")
+pick_timezone "Europe/Stockholm"
+pick_keyboard "se"
+pick_locale "en_US.UTF-8"
 
 USESTATIC=0 STATIC_IP='' STATIC_MASK='' STATIC_GW='' STATIC_DNS=''
 if ! confirm "Network" "Use DHCP? (No = static IP)"; then
