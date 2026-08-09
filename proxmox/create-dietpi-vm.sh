@@ -304,16 +304,20 @@ echo "Creating VM ${VMID} (${VM_NAME})..."
 # create the bare config first and attach storage afterwards: when the create
 # fails, typically on a taken ID, nothing of ours exists yet and nothing is
 # removed. The cleanup trap only ever destroys a VM this run created itself.
+# The CPU type is explicit because qm still defaults to kvm64, unlike the UI,
+# and the balloon device is disabled so guests keep their assigned memory.
 if ! qm create "$VMID" \
     --name "$VM_NAME" \
     --cores "$CORES" \
     --memory "$RAM" \
+    --cpu x86-64-v2-AES \
+    --balloon 0 \
     --net0 "virtio,bridge=${BRIDGE}" \
     --scsihw virtio-scsi-pci \
     --boot order=scsi0 \
     --ostype l26 \
     --onboot 1 \
-    --description "<p align='center'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='40'><br><strong>DietPi</strong><br><a href='https://dietpi.com/docs/'>Docs</a> - <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a></p>"
+    --description "<p align='center'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='40'><br><strong>DietPi</strong><br><a href='https://dietpi.com/docs/'>Documentation</a> &bull; <a href='https://dietpi.com/forum/'>Forum</a><br><br>Created $(date +%F) with <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a> by mews-se</p>"
 then
     echo "Error: qm create failed, is ID $VMID already in use?" >&2
     exit 1
