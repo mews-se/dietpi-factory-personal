@@ -150,7 +150,8 @@ done < "$TMPD/dietpi.txt"
 mirror=$(sed -n 's/^CONFIG_NTP_MIRROR=//p' "$TMPD/dietpi.txt" | head -1)
 if [ -n "$mirror" ]; then
     mkdir -p /etc/systemd/timesyncd.conf.d
-    printf '[Time]\nNTP=%s\n' "$mirror" > /etc/systemd/timesyncd.conf.d/dietpi-factory.conf
+    # the empty NTP= resets the list, systemd appends list settings across files
+    printf '[Time]\nNTP=\nNTP=%s\nFallbackNTP=sth1.ntp.se\n' "$mirror" > /etc/systemd/timesyncd.conf.d/dietpi-factory.conf
 fi
 
 # install the profile key for root right away instead of waiting for the

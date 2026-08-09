@@ -290,7 +290,8 @@ done
 mirror=$(sed -n 's/^CONFIG_NTP_MIRROR=//p' "$TMPD/dietpi.txt" | head -1)
 if [ -n "$mirror" ] && [ -d "$MNT/etc/systemd" ]; then
     mkdir -p "$MNT/etc/systemd/timesyncd.conf.d"
-    printf '[Time]\nNTP=%s\n' "$mirror" > "$MNT/etc/systemd/timesyncd.conf.d/dietpi-factory.conf"
+    # the empty NTP= resets the list, systemd appends list settings across files
+    printf '[Time]\nNTP=\nNTP=%s\nFallbackNTP=sth1.ntp.se\n' "$mirror" > "$MNT/etc/systemd/timesyncd.conf.d/dietpi-factory.conf"
 fi
 
 umount "$MNT"

@@ -25,7 +25,7 @@ AUTO_SETUP_GLOBAL_PASSWORD=dietpi
 #AUTO_SETUP_APT_INSTALLS=
 
 SURVEY_OPTED_IN=1
-CONFIG_NTP_MIRROR=sth1.ntp.se
+CONFIG_NTP_MIRROR=10.0.0.1
 # uncomment together with AUTO_SETUP_SSH_PUBKEY above: without a key this
 # would refuse the root password login the VPS converter tells you to use
 #SOFTWARE_DISABLE_SSH_PASSWORD_LOGINS=root
