@@ -145,16 +145,14 @@ for i in $(seq 0 20); do
     case $i in 0|1|2|5|6|7|17|18|20) echo "aENABLED[$i]=1" ;; *) echo "aENABLED[$i]=0" ;; esac
 done > /boot/dietpi/.dietpi-banner
 
-# fetch a pinned hostctl at the first interactive login, then remove the
-# hook; an existing ~/hostctl is never touched and a missing git heals later
+# fetch hostctl at the first interactive login, then remove the hook; an
+# existing ~/hostctl is never touched and a missing git heals later
 cat > /etc/profile.d/99-hostctl-firstlogin.sh <<'HOOK'
 if [ -n "${PS1:-}" ] && [ "$(id -u)" -ne 0 ] && [ ! -e /var/local/hostctl-firstlogin-done ]; then
     command -v git >/dev/null 2>&1 || sudo apt-get install -y git
     if [ ! -e "$HOME/hostctl" ]; then
         _t=$(mktemp -d)
-        if git clone -q https://github.com/mews-se/hostctl.git "$_t/hostctl" &&
-            git -C "$_t/hostctl" checkout -q 76340ec6b869ced52bd3099daf5222ca10d409f9 &&
-            [ "$(git -C "$_t/hostctl" rev-parse HEAD)" = 76340ec6b869ced52bd3099daf5222ca10d409f9 ]; then
+        if git clone -q https://github.com/mews-se/hostctl.git "$_t/hostctl"; then
             mv "$_t/hostctl" "$HOME/hostctl"
         fi
         rm -rf "$_t"
