@@ -311,6 +311,7 @@ if ! qm create "$VMID" \
     --cores "$CORES" \
     --memory "$RAM" \
     --cpu x86-64-v2-AES \
+    --machine q35 \
     --balloon 0 \
     --tablet 0 \
     --agent 1 \
@@ -327,7 +328,7 @@ then
 fi
 VM_CREATED=1
 # keys pre-enrolled, the images ship the signed Debian boot chain
-[ "$UEFI" = 0 ] || qm set "$VMID" --machine q35 --bios ovmf --efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=1"
+[ "$UEFI" = 0 ] || qm set "$VMID" --bios ovmf --efidisk0 "${STORAGE}:1,efitype=4m,pre-enrolled-keys=1"
 qm set "$VMID" --scsi0 "${STORAGE}:0,import-from=${WORK},discard=on,ssd=1"
 
 # from here the VM is complete and handed over, keep it even if the resize
