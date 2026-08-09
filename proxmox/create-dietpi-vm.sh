@@ -312,12 +312,15 @@ if ! qm create "$VMID" \
     --memory "$RAM" \
     --cpu x86-64-v2-AES \
     --balloon 0 \
+    --tablet 0 \
+    --agent 1 \
+    --tags dietpi-factory-personal \
     --net0 "virtio,bridge=${BRIDGE}" \
     --scsihw virtio-scsi-pci \
     --boot order=scsi0 \
     --ostype l26 \
     --onboot 1 \
-    --description "<p align='center'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='40'><br><strong>DietPi</strong><br><a href='https://dietpi.com/docs/'>Documentation</a> &bull; <a href='https://dietpi.com/forum/'>Forum</a><br><br>Created $(date +%F) with <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a> by mews-se</p>"
+    --description "<div align='center'><a href='https://dietpi.com/'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='72' alt='DietPi'/></a><h2 style='font-size: 22px; margin: 12px 0 2px;'>DietPi</h2><p style='font-size: 13px; margin: 0 0 14px; opacity: 0.7;'>Lightweight justice for your SBC</p><p style='font-size: 14px; margin: 0 0 16px;'><i class='fa fa-book fa-fw'></i> <a href='https://dietpi.com/docs/'>Documentation</a>&nbsp;&nbsp;&nbsp;<i class='fa fa-comments fa-fw'></i> <a href='https://dietpi.com/forum/'>Forum</a>&nbsp;&nbsp;&nbsp;<i class='fa fa-github fa-fw'></i> <a href='https://github.com/MichaIng/DietPi'>GitHub</a></p><p style='font-size: 13px; margin: 0;'>Created $(date +%F) with <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a> by <i class='fa fa-github fa-fw'></i> <a href='https://github.com/mews-se'>mews-se</a></p></div>"
 then
     echo "Error: qm create failed, is ID $VMID already in use?" >&2
     exit 1
@@ -345,5 +348,6 @@ if ! qm start "$VMID"; then
 fi
 
 echo
+MAC=$(qm config "$VMID" | sed -n 's/^net0:[^=]*=\([^,]*\),.*/\1/p')
 echo "Done. VM ${VMID} finishes its DietPi first boot setup on its own."
-echo "It gets a fresh DHCP lease, look for hostname '${VM_NAME}' in your DNS."
+echo "It gets a fresh DHCP lease, look for hostname '${VM_NAME}' in your DNS or MAC ${MAC} in your ARP table."
