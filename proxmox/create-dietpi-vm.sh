@@ -198,8 +198,8 @@ if [ -n "${PS1:-}" ] && [ "$(id -u)" -ne 0 ] && [ ! -e /var/local/hostctl-firstl
     if [ ! -e "$HOME/hostctl" ]; then
         _t=$(mktemp -d)
         if git clone -q https://github.com/mews-se/hostctl.git "$_t/hostctl" &&
-            git -C "$_t/hostctl" checkout -q e855a90c76d88b7b98746dae797d091ebe9518cb &&
-            [ "$(git -C "$_t/hostctl" rev-parse HEAD)" = e855a90c76d88b7b98746dae797d091ebe9518cb ]; then
+            git -C "$_t/hostctl" checkout -q 76340ec6b869ced52bd3099daf5222ca10d409f9 &&
+            [ "$(git -C "$_t/hostctl" rev-parse HEAD)" = 76340ec6b869ced52bd3099daf5222ca10d409f9 ]; then
             mv "$_t/hostctl" "$HOME/hostctl"
         fi
         rm -rf "$_t"
