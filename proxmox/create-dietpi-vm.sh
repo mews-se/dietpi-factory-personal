@@ -66,6 +66,21 @@ require_uint "cores" "$CORES" 1 256
 require_uint "RAM" "$RAM" 128 4194304
 require_uint "disk size" "$DISK" 1 65536
 [[ $VM_NAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#VM_NAME} -le 63 ] || { echo "Error: invalid VM name '$VM_NAME'." >&2; exit 1; }
+# the image URL is case sensitive, catch a typo here instead of as a 404
+# halfway through the run
+case ${DISTRO,,} in
+    bookworm) DISTRO=Bookworm ;;
+    trixie)   DISTRO=Trixie ;;
+    forky)    DISTRO=Forky ;;
+    *) echo "Error: unknown Debian release '$DISTRO', use Bookworm, Trixie or Forky." >&2; exit 1 ;;
+esac
+FIRMWARE=${FIRMWARE,,}
+case $FIRMWARE in
+    bios|uefi) ;;
+    *) echo "Error: firmware must be 'bios' or 'uefi'." >&2; exit 1 ;;
+esac
+# a typo here would only surface when the finished VM fails to start
+[ -e "/sys/class/net/$BRIDGE" ] || { echo "Error: bridge '$BRIDGE' does not exist on this host." >&2; exit 1; }
 
 # fail early on a taken ID, qm create remains the authoritative check;
 # capture first so grep -q cannot close the pipe early under pipefail
@@ -88,8 +103,8 @@ fi
 [ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
 
 case $FIRMWARE in
-    [Uu]*) IMAGE=DietPi_Proxmox-UEFI-x86_64-${DISTRO}.qcow2.xz; UEFI=1 ;;
-    *)     IMAGE=DietPi_Proxmox-x86_64-${DISTRO}.qcow2.xz; UEFI=0 ;;
+    uefi) IMAGE=DietPi_Proxmox-UEFI-x86_64-${DISTRO}.qcow2.xz; UEFI=1 ;;
+    *)    IMAGE=DietPi_Proxmox-x86_64-${DISTRO}.qcow2.xz; UEFI=0 ;;
 esac
 
 ##### Base image cache, checksum gated and never modified #####
@@ -117,16 +132,18 @@ if [ "$CACHED" = 0 ]; then
     xz -dc "$CACHE/$IMAGE" > "$QCOW2.part"
     mv "$QCOW2.part" "$QCOW2"
     echo "$(sha256sum <"$QCOW2" | awk '{print $1}') $DIETPI_SIGNING_KEY" > "$QCOW2.verified"
+    # later runs only use the unpacked image and its receipt, and a rebuild
+    # refetches anyway, so the archive would just sit in the cache
+    rm -f "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
 fi
 exec 8>&-
 
 ##### Inject the profile into a working copy of the image #####
-TMPD=$(mktemp -d)
-MNT=$TMPD/mnt
-mkdir -p "$MNT"
 # working copy on the same filesystem as the cache, reflinked where supported
 WORK=$CACHE/.work.$$.qcow2
 MOUNTED=0 NBD_CONNECTED=0 VM_CREATED=0 HANDOFF=0
+TMPD=$(mktemp -d)
+MNT=$TMPD/mnt
 
 cleanup() {
     set +e
@@ -147,6 +164,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
+mkdir -p "$MNT"
 cp --reflink=auto --sparse=always "$QCOW2" "$WORK"
 
 if [ -n "$PROFILE_DIR" ]; then

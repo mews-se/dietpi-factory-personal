@@ -165,6 +165,10 @@ fi
 PASSWORD=$(askpw "Password" "Global password (empty = dietpi, change after install!)")
 [ -n "$PASSWORD" ] || PASSWORD=dietpi
 SOFTWARE_IDS=$(ask "DietPi software" "dietpi-software IDs, space separated (see https://dietpi.com/docs/software/):" "")
+# a name instead of an ID would only fail in the first run on the machine
+for id in $SOFTWARE_IDS; do
+    [[ $id =~ ^[0-9]+$ ]] || { echo "Error: software ID '$id' is not a number, the IDs are listed at https://dietpi.com/docs/software/." >&2; exit 1; }
+done
 APT_PACKAGES=$(ask "APT packages" "Extra APT packages, space separated:" "")
 
 OUTDIR=profiles/$PROFILE

@@ -46,10 +46,15 @@ case $VIRT in
     *) HW_MODEL=20 ;;
 esac
 
+# a freshly booted machine often runs its own apt right away (cloud-init,
+# apt-daily) and the installer dies on the dpkg lock: stop the timers and
+# wait out any running job via the lock timeout on the apt calls below
+systemctl stop apt-daily.timer apt-daily-upgrade.timer 2>/dev/null || true
+
 # minimal installs ship without curl and wget
 if ! command -v curl >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y curl ca-certificates
+    apt-get -o DPkg::Lock::Timeout=600 update
+    apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates
 fi
 
 TMPD=$(mktemp -d)
@@ -114,11 +119,16 @@ if [ "$ASSUME_YES" != 1 ]; then
     [ "$reply" = YES ] || { echo "Aborted."; exit 1; }
 fi
 
-apt-get update
+# this update also waits out any apt job the installer would collide with
+apt-get -o DPkg::Lock::Timeout=600 update
 DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit." >&2; exit 1; }
 curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
 GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
-    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer
+    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer || {
+    echo "Error: dietpi-installer failed. The system may be partially stripped." >&2
+    echo "Fix the cause above and run this script again, do not reboot as is." >&2
+    exit 1
+}
 rm -f "$TMPD"/dietpi-installer
 
 # the installer stamps the pinned SHA as the permanent dietpi-update target,
@@ -168,7 +178,7 @@ fi
 # DHCP client are there for the reboot
 DHCP_PKG=isc-dhcp-client
 [ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
-if ! { apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown "$DHCP_PKG"; }; then
+if ! { apt-get -o DPkg::Lock::Timeout=600 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ifupdown "$DHCP_PKG"; }; then
     echo "Error: could not install ifupdown and $DHCP_PKG. Do not reboot yet, the" >&2
     echo "network would not come back. Fix APT and install them manually first." >&2
     exit 1
@@ -178,3 +188,14 @@ fi
 echo
 echo "Done. Reboot to run DietPi's first boot setup, it finishes on its own."
 echo "The network comes back as eth0 with DHCP unless the profile says otherwise."
+# the MAC survives the conversion, the hostname and lease may not; sysfs is
+# read directly, this late nothing but the base system can be relied upon
+MAC=''
+for f in /sys/class/net/*/address; do
+    case $f in */lo/*) continue ;; esac
+    MAC=$(cat "$f" 2>/dev/null) || continue
+    break
+done
+if [ -n "$MAC" ]; then
+    echo "Find the machine after the reboot by MAC $MAC in your ARP or DHCP lease table."
+fi

@@ -52,6 +52,8 @@ require_uint "cores" "$CORES" 1 256
 require_uint "RAM" "$RAM" 128 4194304
 require_uint "disk size" "$DISK" 1 65536
 [[ $CT_HOSTNAME =~ ^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?$ ]] && [ ${#CT_HOSTNAME} -le 63 ] || { echo "Error: invalid hostname '$CT_HOSTNAME'." >&2; exit 1; }
+# a typo here would only surface when the container starts
+[ -e "/sys/class/net/$BRIDGE" ] || { echo "Error: bridge '$BRIDGE' does not exist on this host." >&2; exit 1; }
 
 # fail early on a taken ID, pct create remains the authoritative check;
 # capture first so grep -q cannot close the pipe early under pipefail
@@ -83,6 +85,7 @@ else
         NET0="name=eth0,bridge=${BRIDGE},ip=${IPCIDR},gw=${GW}"
     fi
 fi
+[ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
 
 TMPD=$(mktemp -d)
 CT_CREATED=0 HANDOFF=0
@@ -202,7 +205,6 @@ pveam update >/dev/null
 ARCH=$(dpkg --print-architecture)
 TEMPLATE=$(pveam available --section system | awk -v a="$ARCH" '$2 ~ ("^debian-1[23]-standard_.*_" a "\\.tar") {print $2}' | sort -V | tail -1)
 [ -n "$TEMPLATE" ] || { echo "Error: no Debian standard template found via pveam." >&2; exit 1; }
-[ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
 TSTORE=$(pvesm status --content vztmpl | awk 'NR>1 && $3=="active" {print $1; exit}')
 [ -n "$TSTORE" ] || { echo "Error: no active template storage found." >&2; exit 1; }
 # serialize template downloads and accept a concurrent winner; the list is
@@ -241,7 +243,9 @@ pct create "$CTID" "$TSTORE:vztmpl/${TEMPLATE}" \
     --unprivileged 1 \
     --features nesting=1 \
     --ostype debian \
-    --onboot 1
+    --onboot 1 \
+    --tags dietpi-factory-personal \
+    --description "<div align='center'><a href='https://dietpi.com/'><img src='https://dietpi.com/images/dietpi-logo_128x128.png' width='72' alt='DietPi'/></a><h2 style='font-size: 22px; margin: 12px 0 2px;'>DietPi</h2><p style='font-size: 13px; margin: 0 0 14px; opacity: 0.7;'>Lightweight justice for your SBC</p><p style='font-size: 14px; margin: 0 0 16px;'><i class='fa fa-book fa-fw'></i> <a href='https://dietpi.com/docs/'>Documentation</a>&nbsp;&nbsp;&nbsp;<i class='fa fa-comments fa-fw'></i> <a href='https://dietpi.com/forum/'>Forum</a>&nbsp;&nbsp;&nbsp;<i class='fa fa-github fa-fw'></i> <a href='https://github.com/MichaIng/DietPi'>GitHub</a></p><p style='font-size: 13px; margin: 0;'>Created $(date +%F) with <a href='https://github.com/mews-se/dietpi-factory-personal'>dietpi-factory-personal</a> by <i class='fa fa-github fa-fw'></i> <a href='https://github.com/mews-se'>mews-se</a></p></div>"
 CT_CREATED=1
 
 pct start "$CTID"
@@ -252,7 +256,7 @@ for _ in $(seq 1 30); do
 done
 
 echo "Converting Debian to DietPi, this takes a while..."
-pct exec "$CTID" -- bash -c "apt-get update && apt-get install -y curl ca-certificates"
+pct exec "$CTID" -- bash -c "apt-get -o DPkg::Lock::Timeout=600 update && apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates"
 DIETPI_REF=$(resolve_dietpi_ref) || DIETPI_REF=master
 pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/MichaIng/DietPi/${DIETPI_REF}/.build/images/dietpi-installer' -o \"\$I\" && \
     GITOWNER=MichaIng GITBRANCH=${DIETPI_REF} HW_MODEL=75 DISTRO_TARGET=${DISTRO_TARGET} IMAGE_CREATOR=mews_se \
@@ -270,7 +274,7 @@ pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/die
 
 # the conversion removes ifupdown2 from the template and clears the APT lists
 echo "Installing ifupdown..."
-pct exec "$CTID" -- bash -c "apt-get update -q && DEBIAN_FRONTEND=noninteractive apt-get install -y ifupdown isc-dhcp-client"
+pct exec "$CTID" -- bash -c "apt-get -o DPkg::Lock::Timeout=600 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ifupdown isc-dhcp-client"
 
 echo "Applying profile..."
 # the installer ships the stock dietpi.txt, so drop its copies of the profile
@@ -294,5 +298,9 @@ pct stop "$CTID"
 pct start "$CTID"
 
 echo
+MAC=$(pct config "$CTID" | sed -n 's/^net0:.*hwaddr=\([^,]*\).*/\1/p')
 echo "Done. Container ${CTID} finishes its DietPi first run setup on its own."
+if [[ $NET0 == *ip=dhcp* ]]; then
+    echo "It gets a fresh DHCP lease, look for hostname '${CT_HOSTNAME}' in your DNS or MAC ${MAC} in your ARP table."
+fi
 echo "Follow along with: pct console ${CTID}"
