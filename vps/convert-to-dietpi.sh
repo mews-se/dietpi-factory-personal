@@ -57,6 +57,19 @@ if ! command -v curl >/dev/null 2>&1; then
     apt-get -o DPkg::Lock::Timeout=600 install -y curl ca-certificates
 fi
 
+# the conversion can remove the network stack that was in use (NetworkManager,
+# netplan, cloud-init), and on desktop installs the network dies with it long
+# before the run ends: put ifupdown and a DHCP client in place now, while apt
+# still has a network, and abort before anything destructive if that fails
+DHCP_PKG=isc-dhcp-client
+[ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
+if [ "$(dpkg-query -W -f='${db:Status-Abbrev}\n' ifupdown "$DHCP_PKG" 2>/dev/null | grep -c '^ii')" -ne 2 ]; then
+    if ! { apt-get -o DPkg::Lock::Timeout=600 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ifupdown "$DHCP_PKG"; }; then
+        echo "Error: could not install ifupdown and $DHCP_PKG, the network would not survive the conversion. Fix APT and retry." >&2
+        exit 1
+    fi
+fi
+
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 if [ -n "$PROFILE_DIR" ]; then
@@ -173,14 +186,12 @@ if [ -n "$pubkey" ]; then
     chmod 600 /root/.ssh/authorized_keys
 fi
 
-# the conversion can remove the network stack that was in use (ifupdown2,
-# netplan, cloud-init) and clears the APT lists, so make sure ifupdown and a
-# DHCP client are there for the reboot
-DHCP_PKG=isc-dhcp-client
-[ "$DISTRO_TARGET" -lt 9 ] || DHCP_PKG=dhcpcd-base
-if ! { apt-get -o DPkg::Lock::Timeout=600 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ifupdown "$DHCP_PKG"; }; then
-    echo "Error: could not install ifupdown and $DHCP_PKG. Do not reboot yet, the" >&2
-    echo "network would not come back. Fix APT and install them manually first." >&2
+# ifupdown and the DHCP client were put in place before the installer ran,
+# but verify they survived the conversion - no apt here, the network may
+# already be gone (the purge takes NetworkManager with it on desktops)
+if [ "$(dpkg-query -W -f='${db:Status-Abbrev}\n' ifupdown "$DHCP_PKG" 2>/dev/null | grep -c '^ii')" -ne 2 ]; then
+    echo "Error: ifupdown or $DHCP_PKG went missing during the conversion. Do not" >&2
+    echo "reboot yet, the network would not come back. Install them manually first." >&2
     exit 1
 fi
 
