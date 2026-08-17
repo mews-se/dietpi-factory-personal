@@ -184,7 +184,7 @@ AUTO_SETUP_SSH_SERVER_INDEX=-2
 AUTO_SETUP_AUTOMATED=1
 AUTO_SETUP_GLOBAL_PASSWORD=dietpi
 SURVEY_OPTED_IN=1
-CONFIG_NTP_MIRROR=sth1.ntp.se
+CONFIG_NTP_MIRROR=10.0.0.1
 EOF
     echo "AUTO_SETUP_NET_HOSTNAME=$VM_NAME" >> "$TMPD/dietpi.txt"
     # kept byte-identical with config/Automation_Custom_Script.sh and the

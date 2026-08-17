@@ -204,7 +204,8 @@ mkdir -p "$OUTDIR"
     [ -z "$APT_PACKAGES" ] || echo "AUTO_SETUP_APT_INSTALLS=$APT_PACKAGES"
     echo
     echo "SURVEY_OPTED_IN=1"
-    echo "CONFIG_NTP_MIRROR=sth1.ntp.se"
+    # the LAN gateway answers NTP, same as the base profile
+    echo "CONFIG_NTP_MIRROR=10.0.0.1"
     [ -z "$SSH_PUBKEY" ] || echo "SOFTWARE_DISABLE_SSH_PASSWORD_LOGINS=root"
 } > "$OUTDIR/dietpi.txt"
 
