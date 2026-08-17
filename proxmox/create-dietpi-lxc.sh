@@ -183,12 +183,15 @@ fi
 
 # a profile saved with Windows line endings would ride a stray \r into
 # every value, DietPi applies them verbatim
-if grep -q $'\r' "$TMPD/dietpi.txt"; then
-    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
-    exit 1
-fi
+for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh"; do
+    [ -r "$pfile" ] || continue
+    if grep -q $'\r' "$pfile"; then
+        echo "Error: ${pfile##*/} has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+        exit 1
+    fi
+done
 
-# upstream treats the key as an URL field and a bundled script runs on file
+# upstream treats the key as a URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
 CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
 if [ "$CSX" = 1 ]; then
@@ -275,8 +278,8 @@ pct exec "$CTID" -- sed -i 's/^DEV_GITBRANCH=.*/DEV_GITBRANCH=master/' /boot/die
 
 # dietpi-software initialises Dropbear as pre-installed although container
 # images never ship it, which makes the first run skip the SSH server.
-# Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
-# the state file itself, so only add the line while master still lacks it
+# The installer seeds the state file itself since MichaIng/DietPi@4a26253,
+# so this is a no-op on current master and only guards against a regression
 pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/dietpi/.installed 2>/dev/null || echo "aSOFTWARE_INSTALL_STATE[104]=0" >> /boot/dietpi/.installed'
 
 # the conversion removes ifupdown2 from the template and clears the APT lists

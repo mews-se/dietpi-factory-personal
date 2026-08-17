@@ -243,12 +243,15 @@ fi
 
 # a profile saved with Windows line endings would ride a stray \r into
 # every value, DietPi applies them verbatim
-if grep -q $'\r' "$TMPD/dietpi.txt"; then
-    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
-    exit 1
-fi
+for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh"; do
+    [ -r "$pfile" ] || continue
+    if grep -q $'\r' "$pfile"; then
+        echo "Error: ${pfile##*/} has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+        exit 1
+    fi
+done
 
-# upstream treats the key as an URL field and a bundled script runs on file
+# upstream treats the key as a URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
 CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
 if [ "$CSX" = 1 ]; then

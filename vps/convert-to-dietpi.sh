@@ -70,6 +70,11 @@ if [ "$(dpkg-query -W -f='${db:Status-Abbrev}\n' ifupdown "$DHCP_PKG" 2>/dev/nul
     fi
 fi
 
+# pin the run to one resolved master commit so the installer script and its
+# GITBRANCH checkout cannot drift apart, and fail on it before the operator
+# has confirmed anything
+DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit, check the network and retry." >&2; exit 1; }
+
 TMPD=$(mktemp -d)
 trap 'rm -rf "$TMPD"' EXIT
 if [ -n "$PROFILE_DIR" ]; then
@@ -83,12 +88,15 @@ fi
 
 # a profile saved with Windows line endings would ride a stray \r into
 # every value, DietPi applies them verbatim
-if grep -q $'\r' "$TMPD/dietpi.txt"; then
-    echo "Error: the profile has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
-    exit 1
-fi
+for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh"; do
+    [ -r "$pfile" ] || continue
+    if grep -q $'\r' "$pfile"; then
+        echo "Error: ${pfile##*/} has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
+        exit 1
+    fi
+done
 
-# upstream treats the key as an URL field and a bundled script runs on file
+# upstream treats the key as a URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
 CSX=$(sed -n '/^[[:blank:]]*AUTO_SETUP_CUSTOM_SCRIPT_EXEC=/{s/^[^=]*=//p;q}' "$TMPD/dietpi.txt")
 if [ "$CSX" = 1 ]; then
@@ -134,9 +142,6 @@ fi
 
 # this update also waits out any apt job the installer would collide with
 apt-get -o DPkg::Lock::Timeout=600 update
-# pin the run to one resolved master commit so the installer script and its
-# GITBRANCH checkout cannot drift apart
-DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit, check the network and retry." >&2; exit 1; }
 curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
 GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
     IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer || {
