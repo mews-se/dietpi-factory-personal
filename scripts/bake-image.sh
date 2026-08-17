@@ -12,7 +12,7 @@ set -euo pipefail
 BASE_URL=https://dietpi.com/downloads/images
 CACHE=/var/cache/dietpi-factory
 SRC=${1:-}
-PROFILE_DIR=${2:-$(dirname "$0")/../config}
+PROFILE_DIR=${PROFILE_DIR:-${2:-$(dirname "$0")/../config}}
 
 [ "$(uname)" = Linux ] || { echo "Error: needs Linux for loop mounts." >&2; exit 1; }
 [ "$EUID" -eq 0 ] || { echo "Error: run as root." >&2; exit 1; }

@@ -134,7 +134,9 @@ fi
 
 # this update also waits out any apt job the installer would collide with
 apt-get -o DPkg::Lock::Timeout=600 update
-DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit." >&2; exit 1; }
+# pin the run to one resolved master commit so the installer script and its
+# GITBRANCH checkout cannot drift apart
+DIETPI_REF=$(resolve_dietpi_ref) || { echo "Error: could not resolve the DietPi master commit, check the network and retry." >&2; exit 1; }
 curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
 GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
     IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer || {

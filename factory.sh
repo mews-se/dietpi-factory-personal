@@ -217,4 +217,4 @@ chmod 700 "$OUTDIR/Automation_Custom_Script.sh"
 
 echo
 echo "Profile written to $OUTDIR/"
-echo "Use it with proxmox/create-dietpi-lxc.sh, or copy both files to /boot/ on a flashed DietPi image."
+echo "Use it with the deployment scripts, or copy both files to /boot/ on a flashed DietPi image."
