@@ -25,7 +25,11 @@ resolve_dietpi_ref() {
 
 [ "$EUID" -eq 0 ] || { echo "Error: run as root." >&2; exit 1; }
 . /etc/os-release 2>/dev/null || { echo "Error: cannot read /etc/os-release." >&2; exit 1; }
-[ "${ID:-}" = debian ] || { echo "Error: this is not Debian (ID=${ID:-unknown})." >&2; exit 1; }
+case ${ID:-} in
+    debian|raspbian) ;;
+    # 32-bit Raspberry Pi OS calls itself raspbian, the 64-bit one debian
+    *) [[ " ${ID_LIKE:-} " == *' debian '* ]] || { echo "Error: this is not Debian (ID=${ID:-unknown})." >&2; exit 1; } ;;
+esac
 if [ -n "$PROFILE_DIR" ] && [ ! -r "$PROFILE_DIR/dietpi.txt" ]; then
     echo "Error: no readable dietpi.txt in profile dir '$PROFILE_DIR'." >&2
     exit 1
