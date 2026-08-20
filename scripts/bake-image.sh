@@ -23,7 +23,7 @@ PROFILE_NAME=$(basename "$PROFILE_DIR")
 
 # a profile saved with Windows line endings would ride a stray \r into
 # every value, DietPi applies them verbatim
-for pfile in "$PROFILE_DIR/dietpi.txt" "$PROFILE_DIR/Automation_Custom_Script.sh"; do
+for pfile in "$PROFILE_DIR/dietpi.txt" "$PROFILE_DIR/Automation_Custom_Script.sh" "$PROFILE_DIR/dietpi-wifi.txt"; do
     [ -r "$pfile" ] || continue
     if grep -q $'\r' "$pfile"; then
         echo "Error: ${pfile##*/} has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
@@ -238,6 +238,12 @@ done < "$PROFILE_DIR/dietpi.txt"
 # key, that is not an error
 { echo; grep -E '^[A-Z][A-Z0-9_]*=' "$PROFILE_DIR/dietpi.txt" | grep -vx 'AUTO_SETUP_CUSTOM_SCRIPT_EXEC=1' || true; } >> "$TARGET/dietpi.txt"
 [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TARGET/Automation_Custom_Script.sh"
+# a wireless machine has no other way in: DietPi reads the credentials from
+# here on the first boot, so a flashed image is the whole setup
+if [ -r "$PROFILE_DIR/dietpi-wifi.txt" ]; then
+    cp "$PROFILE_DIR/dietpi-wifi.txt" "$TARGET/dietpi-wifi.txt"
+    chmod 600 "$TARGET/dietpi-wifi.txt" 2>/dev/null || true
+fi
 
 # make the very first time sync use the profile mirror as well; only doable
 # when the rootfs is in reach (PC images), SBC boot partitions are FAT only

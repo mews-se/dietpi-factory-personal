@@ -10,7 +10,7 @@
 #
 # Pass a factory.sh profile directory as first argument (or PROFILE_DIR),
 # otherwise the base profile from the repo is used. ASSUME_YES=1 skips the
-# confirmation.
+# confirmation, WIFI=0|1 answers the WiFi question up front.
 set -euo pipefail
 
 PROFILE_URL=https://raw.githubusercontent.com/mews-se/dietpi-factory-personal/main/config
@@ -76,6 +76,93 @@ case $VIRT in
     *) HW_MODEL=20 ;;
 esac
 
+is_wireless() {
+    [ -e "/sys/class/net/$1/wireless" ] || [ -e "/sys/class/net/$1/phy80211" ]
+}
+
+# the installer autoremoves everything it does not require and only then
+# downloads its own packages: a link held by NetworkManager or netplan is
+# already gone by that download, one held by ifupdown survives it because
+# ifupdown and wpasupplicant are on the installer's own required list
+ifupdown_owns() {
+    [ -r /run/network/ifstate ] && grep -q "^$1=" /run/network/ifstate
+}
+
+DEFAULT_DEV=$(ip -o route get 1.1.1.1 2>/dev/null | sed -n 's/.*[[:blank:]]dev[[:blank:]]\{1,\}\([^[:blank:]]\{1,\}\).*/\1/p' | head -1) || DEFAULT_DEV=''
+ON_WIFI=0
+if [ -n "$DEFAULT_DEV" ] && is_wireless "$DEFAULT_DEV"; then ON_WIFI=1; fi
+
+if [ "$ON_WIFI" = 1 ] && ! ifupdown_owns "$DEFAULT_DEV"; then
+    echo "Error: this session runs over $DEFAULT_DEV, a wireless interface that ifupdown" >&2
+    echo "does not manage. The conversion cannot survive it: the installer removes the" >&2
+    echo "network stack holding the link and only afterwards downloads the packages it" >&2
+    echo "needs, so the run dies offline and the machine does not come back." >&2
+    echo "Convert over Ethernet, or flash an image built with scripts/bake-image.sh." >&2
+    exit 1
+fi
+
+wifi_capable() {
+    local d
+    for d in /sys/class/net/*
+    do
+        if is_wireless "${d##*/}"; then return 0; fi
+    done
+    # a machine converted once before has no wireless interface left, its
+    # firmware went out with the first run: ask the board instead
+    case $HW_NAME in
+        'Raspberry Pi 3'*|'Raspberry Pi 4'*|'Raspberry Pi 5'*|'Raspberry Pi Zero '*W*|'Raspberry Pi Compute Module '[45]*) return 0 ;;
+    esac
+    return 1
+}
+
+# dietpi-wifi.txt is sourced as bash and takes either a passphrase or a 64
+# hex digit PSK as is, which is exactly how both sources below store them
+wifi_slot() {
+    local ssid=${2//\'/\'\\\'\'} key=${3//\'/\'\\\'\'}
+    printf "aWIFI_SSID[%s]='%s'\naWIFI_KEY[%s]='%s'\naWIFI_KEYMGR[%s]='WPA-PSK'\n" "$1" "$ssid" "$1" "$key" "$1"
+}
+
+# DietPi holds five slots; NetworkManager stamps the last successful
+# activation into the file, so the newest timestamp is the network in use.
+# /run carries the connections rendered from netplan, which is the only
+# copy a netplan managed machine has
+harvest_wifi() {
+    local n=0 f ssid key seen=
+    while IFS= read -r f
+    do
+        [ -n "$f" ] || continue
+        ssid=$(sed -n 's/^ssid=//p' "$f" | head -1)
+        key=$(sed -n 's/^psk=//p' "$f" | head -1)
+        [ -n "$ssid" ] && [ -n "$key" ] || continue
+        if printf '%s\n' "$seen" | grep -qxF "$ssid"; then continue; fi
+        seen=$seen$'\n'$ssid
+        wifi_slot "$n" "$ssid" "$key"
+        n=$((n + 1))
+        [ "$n" -lt 5 ] || return 0
+    done < <(
+        for f in /etc/NetworkManager/system-connections/*.nmconnection /run/NetworkManager/system-connections/*.nmconnection
+        do
+            if [ ! -r "$f" ] || ! grep -q '^type=wifi' "$f"; then continue; fi
+            printf '%s|%s\n' "$(sed -n 's/^timestamp=//p' "$f" | head -1)" "$f"
+        done 2>/dev/null | sort -t'|' -k1,1nr | cut -d'|' -f2-
+    )
+    [ "$n" = 0 ] || return 0
+
+    [ -r /etc/wpa_supplicant/wpa_supplicant.conf ] || return 0
+    while IFS='|' read -r ssid key
+    do
+        [ -n "$ssid" ] && [ -n "$key" ] || continue
+        wifi_slot "$n" "$ssid" "$key"
+        n=$((n + 1))
+        [ "$n" -lt 5 ] || return 0
+    done < <(mawk '
+        /^[[:space:]]*network[[:space:]]*=[[:space:]]*{/ { s = ""; k = ""; inb = 1; next }
+        inb && /^[[:space:]]*}/ { if (s != "" && k != "") print s "|" k; inb = 0; next }
+        inb && match($0, /^[[:space:]]*ssid[[:space:]]*=[[:space:]]*/) { s = substr($0, RLENGTH + 1); gsub(/^"|"$/, "", s); next }
+        inb && match($0, /^[[:space:]]*psk[[:space:]]*=[[:space:]]*/) { k = substr($0, RLENGTH + 1); gsub(/^"|"$/, "", k); next }
+    ' /etc/wpa_supplicant/wpa_supplicant.conf)
+}
+
 # a freshly booted machine often runs its own apt right away (cloud-init,
 # apt-daily) and the installer dies on the dpkg lock: stop the timers and
 # wait out any running job via the lock timeout on the apt calls below
@@ -110,6 +197,7 @@ trap 'rm -rf "$TMPD"' EXIT
 if [ -n "$PROFILE_DIR" ]; then
     cp "$PROFILE_DIR/dietpi.txt" "$TMPD/dietpi.txt"
     [ ! -r "$PROFILE_DIR/Automation_Custom_Script.sh" ] || cp "$PROFILE_DIR/Automation_Custom_Script.sh" "$TMPD/Automation_Custom_Script.sh"
+    [ ! -r "$PROFILE_DIR/dietpi-wifi.txt" ] || cp "$PROFILE_DIR/dietpi-wifi.txt" "$TMPD/dietpi-wifi.txt"
 else
     echo "No profile given, fetching the base profile from the repo..."
     curl -fsSL "$PROFILE_URL/dietpi.txt" -o "$TMPD/dietpi.txt"
@@ -118,7 +206,7 @@ fi
 
 # a profile saved with Windows line endings would ride a stray \r into
 # every value, DietPi applies them verbatim
-for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh"; do
+for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh" "$TMPD/dietpi-wifi.txt"; do
     [ -r "$pfile" ] || continue
     if grep -q $'\r' "$pfile"; then
         echo "Error: ${pfile##*/} has Windows (CRLF) line endings, convert it with e.g. dos2unix." >&2
@@ -146,6 +234,64 @@ BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$TMPD/dietpi.txt" || true)
 
 echo "This converts $PRETTY_NAME on $(hostname) to DietPi."
 echo "Detected: ${HW_NAME:-$([ "$VIRT" = none ] && echo "bare metal" || echo "$VIRT")} (HW_MODEL=$HW_MODEL), target distro $VERSION_CODENAME."
+
+# the installer either installs the whole WiFi stack or purges it, with
+# nothing in between, and it purges whatever manages the network today: a
+# wireless machine that skips WiFi loses its only link mid-run. Settle this
+# before the confirmation and carry the credentials over, since installing
+# wpasupplicant without them reconnects to nothing. A link this run cannot
+# survive at all was already refused above.
+WIFI=${WIFI:-}
+if [ "$HW_MODEL" = 20 ] || [ "$HW_MODEL" = 75 ]; then
+    # the installer forces WiFi off for virtual machines and containers anyway
+    WIFI=0
+elif [ -z "$WIFI" ]; then
+    if ! wifi_capable; then
+        WIFI=0
+    elif [ "$ASSUME_YES" = 1 ] || ! ( : </dev/tty ) 2>/dev/null; then
+        # unattended: never take the link away from a machine that is using it
+        WIFI=$ON_WIFI
+    else
+        echo
+        if [ "$ON_WIFI" = 1 ]; then
+            echo "This session runs over $DEFAULT_DEV, a wireless interface. Without WiFi"
+            echo "support the machine goes offline during the conversion and needs an"
+            echo "Ethernet cable to come back."
+            WIFI_DEFAULT=y
+        else
+            echo "WiFi support pulls in around 380 MiB of firmware packages."
+            WIFI_DEFAULT=n
+        fi
+        read -rp "Install WiFi support? [$WIFI_DEFAULT]: " reply </dev/tty
+        [ -n "$reply" ] || reply=$WIFI_DEFAULT
+        case $reply in [Yy]*) WIFI=1 ;; *) WIFI=0 ;; esac
+    fi
+fi
+case $WIFI in
+    0) echo "WiFi support: disabled" ;;
+    1) echo "WiFi support: enabled" ;;
+    *) echo "Error: WIFI must be 0 or 1, got '$WIFI'." >&2; exit 1 ;;
+esac
+
+WIFI_COUNTRY=''
+if [ "$WIFI" = 1 ]; then
+    [ -s "$TMPD/dietpi-wifi.txt" ] || harvest_wifi > "$TMPD/dietpi-wifi.txt"
+    if [ "$ON_WIFI" = 1 ] && [ ! -s "$TMPD/dietpi-wifi.txt" ] && { [ "$ASSUME_YES" = 1 ] || ! ( : </dev/tty ) 2>/dev/null; }; then
+        echo "Error: no WiFi credentials found to carry over, and this session runs" >&2
+        echo "over $DEFAULT_DEV. The machine would not come back after the conversion." >&2
+        echo "Put the SSID and key in the profile as dietpi-wifi.txt, or run this" >&2
+        echo "interactively to decide at the prompt." >&2
+        exit 1
+    fi
+    # a wrong regulatory domain silently costs the 5 GHz channels
+    if [ -r /etc/wpa_supplicant/wpa_supplicant.conf ]; then
+        WIFI_COUNTRY=$(sed -n 's/^[[:blank:]]*country=//p' /etc/wpa_supplicant/wpa_supplicant.conf | head -1)
+    fi
+    if [ -z "$WIFI_COUNTRY" ] && command -v iw > /dev/null; then
+        WIFI_COUNTRY=$(iw reg get | sed -n 's/^country \([A-Z][A-Z]\):.*/\1/p' | head -1) || WIFI_COUNTRY=''
+    fi
+fi
+
 echo
 echo "Everything outside the base system is removed, including user home"
 echo "directories, and the SSH host keys are reset. A session as a normal"
@@ -157,6 +303,18 @@ if [ -z "$pubkey" ]; then
     echo
     echo "WARNING: the profile has no SSH public key. On a remote machine, make"
     echo "sure you know the profile password or you will be locked out."
+fi
+if [ "$ON_WIFI" = 1 ] && [ "$WIFI" = 0 ]; then
+    echo
+    echo "WARNING: this session runs over $DEFAULT_DEV and WiFi support is being"
+    echo "removed. The machine drops off the network the moment the old network"
+    echo "stack is purged, and needs an Ethernet cable to come back."
+fi
+if [ "$WIFI" = 1 ] && [ ! -s "$TMPD/dietpi-wifi.txt" ]; then
+    echo
+    echo "WARNING: no WiFi credentials found to carry over. The packages get"
+    echo "installed but the machine reconnects to nothing; put the SSID and key"
+    echo "into /boot/dietpi-wifi.txt before rebooting."
 fi
 # read the confirmation from the terminal so "curl | bash" works too
 if [ "$ASSUME_YES" != 1 ]; then
@@ -174,7 +332,7 @@ fi
 apt-get -o DPkg::Lock::Timeout=600 update
 curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
 GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
-    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=0 bash "$TMPD"/dietpi-installer || {
+    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=$WIFI bash "$TMPD"/dietpi-installer || {
     echo "Error: dietpi-installer failed. The system may be partially stripped." >&2
     echo "Fix the cause above and run this script again, do not reboot as is." >&2
     exit 1
@@ -197,6 +355,22 @@ fi
 # keys and append ours (DietPi reads the first match); profile and SSH key go
 # in before anything that needs the network again, a failure further down
 # must not leave the machine unconfigured or unreachable
+if [ "$WIFI" = 1 ]; then
+    # DietPi gives WiFi priority at first boot and disables Ethernet, which
+    # is what a wireless machine needs; the base profile says the opposite
+    sed -i '/^AUTO_SETUP_NET_WIFI_ENABLED=/d' "$TMPD/dietpi.txt"
+    echo 'AUTO_SETUP_NET_WIFI_ENABLED=1' >> "$TMPD/dietpi.txt"
+    if [ -n "$WIFI_COUNTRY" ]; then
+        sed -i '/^AUTO_SETUP_NET_WIFI_COUNTRY_CODE=/d' "$TMPD/dietpi.txt"
+        echo "AUTO_SETUP_NET_WIFI_COUNTRY_CODE=$WIFI_COUNTRY" >> "$TMPD/dietpi.txt"
+    fi
+    if [ -s "$TMPD/dietpi-wifi.txt" ]; then
+        # overwrites the empty one the installer generates
+        cp "$TMPD/dietpi-wifi.txt" /boot/dietpi-wifi.txt
+        chmod 600 /boot/dietpi-wifi.txt
+    fi
+fi
+
 while IFS= read -r line; do
     [[ $line =~ ^[A-Z][A-Z0-9_]*= ]] || continue
     key=${line%%=*}
@@ -235,7 +409,11 @@ fi
 
 echo
 echo "Done. Reboot to run DietPi's first boot setup, it finishes on its own."
-echo "The network comes back as eth0 with DHCP unless the profile says otherwise."
+if [ "$WIFI" = 1 ] && [ -s "$TMPD/dietpi-wifi.txt" ]; then
+    echo "The network comes back on WiFi with the credentials carried over."
+else
+    echo "The network comes back as eth0 with DHCP unless the profile says otherwise."
+fi
 # the MAC survives the conversion, the hostname and lease may not; sysfs is
 # read directly, this late nothing but the base system can be relied upon
 MAC=''
