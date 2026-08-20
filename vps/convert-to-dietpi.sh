@@ -39,10 +39,36 @@ case ${VERSION_CODENAME:-} in
     *) echo "Error: unsupported Debian release '${VERSION_CODENAME:-unknown}'." >&2; exit 1 ;;
 esac
 
+# the installer keys its bootloader and kernel choice off the hardware model
+# and validates the value against the menu for the detected architecture, so
+# a Raspberry Pi has to be named as one: 21 is x86 and gets rejected on ARM
+HW_NAME=''
+[ ! -r /proc/device-tree/model ] || HW_NAME=$(tr -d '\0' < /proc/device-tree/model)
+USERLAND_ARCH=$(dpkg --print-architecture)
+
 VIRT=$(systemd-detect-virt 2>/dev/null) || VIRT=none
 case $VIRT in
     lxc|lxc-libvirt|openvz|systemd-nspawn) HW_MODEL=75 ;;
-    none) HW_MODEL=21 ;;
+    none)
+        # the 5 patterns cover the 500 and the 4 patterns the 400, same SoC
+        case $HW_NAME in
+            'Raspberry Pi 5'*|'Raspberry Pi Compute Module 5'*)
+                if [ "$USERLAND_ARCH" = arm64 ]; then HW_MODEL=5; else HW_MODEL=4; fi ;;
+            'Raspberry Pi 4'*|'Raspberry Pi Compute Module 4'*) HW_MODEL=4 ;;
+            'Raspberry Pi 3'*|'Raspberry Pi Compute Module 3'*|'Raspberry Pi Zero 2'*)
+                if [ "$USERLAND_ARCH" = arm64 ]; then HW_MODEL=4; else HW_MODEL=2; fi ;;
+            'Raspberry Pi 2'*) HW_MODEL=2 ;;
+            'Raspberry Pi'*) HW_MODEL=1 ;;
+            *)
+                case $USERLAND_ARCH in
+                    amd64|i386) HW_MODEL=21 ;;
+                    # "generic device", the installer leaves the bootloader
+                    # and kernel of unlisted hardware alone
+                    *) HW_MODEL=22 ;;
+                esac
+            ;;
+        esac
+    ;;
     *) HW_MODEL=20 ;;
 esac
 
@@ -115,7 +141,7 @@ BAD=$(grep -vE '^[A-Z][A-Z0-9_]*=|^#|^[[:space:]]*$' "$TMPD/dietpi.txt" || true)
 [ -z "$BAD" ] || { printf 'Error: invalid profile lines:\n%s\n' "$BAD" >&2; exit 1; }
 
 echo "This converts $PRETTY_NAME on $(hostname) to DietPi."
-echo "Detected: $([ "$VIRT" = none ] && echo "bare metal" || echo "$VIRT") (HW_MODEL=$HW_MODEL), target distro $VERSION_CODENAME."
+echo "Detected: ${HW_NAME:-$([ "$VIRT" = none ] && echo "bare metal" || echo "$VIRT")} (HW_MODEL=$HW_MODEL), target distro $VERSION_CODENAME."
 echo
 echo "Everything outside the base system is removed, including user home"
 echo "directories, and the SSH host keys are reset. A session as a normal"
