@@ -10,6 +10,9 @@ AUTO_SETUP_NET_WIFI_ENABLED=0
 AUTO_SETUP_NET_USESTATIC=0
 AUTO_SETUP_NET_HOSTNAME=dietpi
 AUTO_SETUP_BOOT_WAIT_FOR_NETWORK=1
+# no IPv6 on these machines: first boot applies it as a sysctl drop-in for
+# existing and future interfaces, and comments the IPv6 entries in /etc/hosts
+CONFIG_ENABLE_IPV6=0
 
 AUTO_SETUP_AUTOSTART_TARGET_INDEX=0
 
