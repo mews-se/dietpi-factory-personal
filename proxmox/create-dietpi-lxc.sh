@@ -115,7 +115,7 @@ else
 AUTO_SETUP_LOCALE=en_US.UTF-8
 AUTO_SETUP_KEYBOARD_LAYOUT=se
 AUTO_SETUP_TIMEZONE=Europe/Stockholm
-AUTO_SETUP_NET_ETHERNET_ENABLED=1
+AUTO_SETUP_NET_ETHERNET_ENABLED=0
 AUTO_SETUP_NET_WIFI_ENABLED=0
 AUTO_SETUP_NET_USESTATIC=0
 AUTO_SETUP_BOOT_WAIT_FOR_NETWORK=1
@@ -190,6 +190,12 @@ for pfile in "$TMPD/dietpi.txt" "$TMPD/Automation_Custom_Script.sh"; do
         exit 1
     fi
 done
+
+# Proxmox owns the veth and rewrites /etc/network/interfaces at every start,
+# a second config applied by dietpi-network at first boot collides with it
+# (failed networking.service, a stray DHCP lease on static containers)
+sed -i '/^AUTO_SETUP_NET_ETHERNET_ENABLED=/d;/^AUTO_SETUP_NET_WIFI_ENABLED=/d' "$TMPD/dietpi.txt"
+printf '%s\n' 'AUTO_SETUP_NET_ETHERNET_ENABLED=0' 'AUTO_SETUP_NET_WIFI_ENABLED=0' >> "$TMPD/dietpi.txt"
 
 # upstream treats the key as a URL field and a bundled script runs on file
 # presence alone, hence drop a legacy boolean or refuse it without a script
@@ -270,7 +276,7 @@ pct exec "$CTID" -- bash -c "apt-get -o DPkg::Lock::Timeout=600 update && apt-ge
 DIETPI_REF=$(resolve_dietpi_ref) || DIETPI_REF=master
 pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubusercontent.com/MichaIng/DietPi/${DIETPI_REF}/.build/images/dietpi-installer' -o \"\$I\" && \
     GITOWNER=MichaIng GITBRANCH=${DIETPI_REF} HW_MODEL=75 DISTRO_TARGET=${DISTRO_TARGET} IMAGE_CREATOR=mews_se \
-    PREIMAGE_INFO='Debian LXC template' WIFI_REQUIRED=0 bash \"\$I\""
+    PREIMAGE_INFO='Debian LXC template' WIFI_REQUIRED=0 GUEST_NETWORK_REQUIRED=1 bash \"\$I\""
 
 # the installer stamps the pinned SHA as the permanent dietpi-update target,
 # which would freeze updates at this commit, point updates back at master
@@ -282,7 +288,8 @@ pct exec "$CTID" -- sed -i 's/^DEV_GITBRANCH=.*/DEV_GITBRANCH=master/' /boot/die
 # so this is a no-op on current master and only guards against a regression
 pct exec "$CTID" -- bash -c 'grep -q "aSOFTWARE_INSTALL_STATE\[104\]=" /boot/dietpi/.installed 2>/dev/null || echo "aSOFTWARE_INSTALL_STATE[104]=0" >> /boot/dietpi/.installed'
 
-# the conversion removes ifupdown2 from the template and clears the APT lists
+# a GUEST_NETWORK_REQUIRED-aware installer (DietPi v10.7+) keeps the network
+# stack itself, older ones remove ifupdown2 and clear the APT lists
 echo "Installing ifupdown..."
 pct exec "$CTID" -- bash -c "apt-get -o DPkg::Lock::Timeout=600 update -q && DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=600 install -y ifupdown isc-dhcp-client"
 

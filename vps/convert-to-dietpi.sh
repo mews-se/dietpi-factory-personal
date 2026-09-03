@@ -331,8 +331,10 @@ fi
 # this update also waits out any apt job the installer would collide with
 apt-get -o DPkg::Lock::Timeout=600 update
 curl -fsSL "https://raw.githubusercontent.com/MichaIng/DietPi/$DIETPI_REF/.build/images/dietpi-installer" -o "$TMPD"/dietpi-installer
+# GUEST_NETWORK_REQUIRED keeps the network stack and Dropbear in container
+# conversions, the installer ignores it for other hardware and before v10.7
 GITOWNER=MichaIng GITBRANCH=$DIETPI_REF HW_MODEL=$HW_MODEL DISTRO_TARGET=$DISTRO_TARGET \
-    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=$WIFI bash "$TMPD"/dietpi-installer || {
+    IMAGE_CREATOR=mews_se PREIMAGE_INFO="$PRETTY_NAME" WIFI_REQUIRED=$WIFI GUEST_NETWORK_REQUIRED=1 bash "$TMPD"/dietpi-installer || {
     echo "Error: dietpi-installer failed. The system may be partially stripped." >&2
     echo "Fix the cause above and run this script again, do not reboot as is." >&2
     exit 1
@@ -345,8 +347,8 @@ sed -i 's/^DEV_GITBRANCH=.*/DEV_GITBRANCH=master/' /boot/dietpi.txt
 
 # dietpi-software initialises Dropbear as pre-installed although containers
 # never ship it, which makes the first run skip the SSH server.
-# Fixed upstream in dev (MichaIng/DietPi@4a26253): the installer now seeds
-# the state file itself, so only add the line while master still lacks it
+# The installer seeds the state file itself since MichaIng/DietPi@4a26253,
+# so this is a no-op on current master and only guards against a regression
 if [ "$HW_MODEL" = 75 ]; then
     grep -q 'aSOFTWARE_INSTALL_STATE\[104\]=' /boot/dietpi/.installed 2>/dev/null || echo 'aSOFTWARE_INSTALL_STATE[104]=0' >> /boot/dietpi/.installed
 fi
