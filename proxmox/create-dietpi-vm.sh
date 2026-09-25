@@ -333,15 +333,15 @@ echo "Creating VM ${VMID} (${VM_NAME})..."
 # create the bare config first and attach storage afterwards: when the create
 # fails, typically on a taken ID, nothing of ours exists yet and nothing is
 # removed. The cleanup trap only ever destroys a VM this run created itself.
-# The CPU type is explicit because qm still defaults to kvm64, unlike the UI,
-# and the balloon device is disabled so guests keep their assigned memory.
+# The CPU type is explicit because qm still defaults to kvm64, unlike the UI.
+# Balloon stays at its default: with --balloon 0 there is no balloon device and
+# PVE shows the QEMU process's memory for the guest, which climbs past 100 %.
 if ! qm create "$VMID" \
     --name "$VM_NAME" \
     --cores "$CORES" \
     --memory "$RAM" \
     --cpu x86-64-v2-AES \
     --machine q35 \
-    --balloon 0 \
     --tablet 0 \
     --agent 1 \
     --tags dietpi-factory-personal \
