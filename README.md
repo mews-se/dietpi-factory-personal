@@ -8,6 +8,18 @@
 
 My personal configuration of [dietpi-factory](https://github.com/mews-se/dietpi-factory): hostctl at first login, OpenSSH, my banner layout and other choices baked in. Use at your own risk, the [general version](https://github.com/mews-se/dietpi-factory) is the better starting point for anyone else.
 
+Baked in:
+
+- en_US.UTF-8, Swedish keyboard and Europe/Stockholm as defaults
+- OpenSSH as the SSH server
+- NTP from the router on my LAN (`CONFIG_NTP_MIRROR`); VMs, conversions and PC images also get it in a timesyncd drop-in so the first sync at boot uses it
+- the DietPi survey opted in
+- IPv6 off, only in config/dietpi.txt (the fallback of the image baker and the converter)
+- SSH password logins for root off when the wizard gets a key
+- my banner layout, and [hostctl](https://github.com/mews-se/hostctl) cloned to ~/hostctl and run at the first interactive login of a non-root user; root logins do not trigger it, and the hook removes itself once hostctl has run
+
+The wizard skips the SSH server and custom script questions: it always picks OpenSSH and copies config/Automation_Custom_Script.sh into the profile. Profile arguments and the rest work as in the [general README](https://github.com/mews-se/dietpi-factory#readme).
+
 Profile wizard:
 
 ```
