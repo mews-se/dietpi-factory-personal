@@ -282,6 +282,12 @@ pct exec "$CTID" -- bash -c "I=\$(mktemp) && curl -fsSL 'https://raw.githubuserc
 # which would freeze updates at this commit, point updates back at master
 pct exec "$CTID" -- sed -i 's/^DEV_GITBRANCH=.*/DEV_GITBRANCH=master/' /boot/dietpi.txt
 
+# the template's deb822 sources duplicate the ones DietPi writes
+pct exec "$CTID" -- rm -f /etc/apt/sources.list.d/debian.sources
+# both fail in an unprivileged container, DietPi drops the sysctl file in
+# containers on its next update anyway
+pct exec "$CTID" -- rm -f /etc/sysctl.d/97-dietpi.conf /etc/systemd/system/local-fs.target.wants/dietpi-fs_partition_resize.service
+
 # dietpi-software initialises Dropbear as pre-installed although container
 # images never ship it, which makes the first run skip the SSH server.
 # The installer seeds the state file itself since MichaIng/DietPi@4a26253,
