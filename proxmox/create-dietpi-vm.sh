@@ -103,14 +103,14 @@ fi
 [ -n "$STORAGE" ] || { echo "Error: no storage selected." >&2; exit 1; }
 
 case $FIRMWARE in
-    uefi) IMAGE=DietPi_Proxmox-UEFI-x86_64-${DISTRO}.qcow2.xz; UEFI=1 ;;
-    *)    IMAGE=DietPi_Proxmox-x86_64-${DISTRO}.qcow2.xz; UEFI=0 ;;
+    uefi) IMAGE=DietPi_VM-UEFI-x86_64-${DISTRO}.qcow2; UEFI=1 ;;
+    *)    IMAGE=DietPi_VM-x86_64-${DISTRO}.qcow2; UEFI=0 ;;
 esac
 
 ##### Base image cache, checksum gated and never modified #####
 mkdir -p "$CACHE"
 chmod 700 "$CACHE"
-QCOW2=$CACHE/${IMAGE%.xz}
+QCOW2=$CACHE/$IMAGE
 exec 8>"$CACHE/.download.lock"
 chmod 600 "$CACHE/.download.lock"
 flock -w 3600 8 || { echo "Error: timed out waiting for a concurrent download." >&2; exit 1; }
@@ -123,18 +123,14 @@ if [ -f "$QCOW2" ] && [ -f "$QCOW2.verified" ] && \
 fi
 if [ "$CACHED" = 0 ]; then
     echo "Downloading ${IMAGE}..."
-    rm -f "$QCOW2" "$QCOW2.verified" "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
-    curl -fL -o "$CACHE/$IMAGE" "$BASE_URL/$IMAGE"
-    curl -fsL -o "$CACHE/$IMAGE.sha256" "$BASE_URL/$IMAGE.sha256"
-    curl -fsL -o "$CACHE/$IMAGE.asc" "$BASE_URL/$IMAGE.asc"
+    rm -f "$QCOW2" "$QCOW2.verified" "$QCOW2.sha256" "$QCOW2.asc"
+    curl -fL -o "$QCOW2" "$BASE_URL/$IMAGE"
+    curl -fsL -o "$QCOW2.sha256" "$BASE_URL/$IMAGE.sha256"
+    curl -fsL -o "$QCOW2.asc" "$BASE_URL/$IMAGE.asc"
     ( cd "$CACHE" && sha256sum -c "$IMAGE.sha256" )
-    verify_signature "$CACHE/$IMAGE"
-    xz -dc "$CACHE/$IMAGE" > "$QCOW2.part"
-    mv "$QCOW2.part" "$QCOW2"
+    verify_signature "$QCOW2"
     echo "$(sha256sum <"$QCOW2" | awk '{print $1}') $DIETPI_SIGNING_KEY" > "$QCOW2.verified"
-    # later runs only use the unpacked image and its receipt, and a rebuild
-    # refetches anyway, so the archive would just sit in the cache
-    rm -f "$CACHE/$IMAGE" "$CACHE/$IMAGE.sha256" "$CACHE/$IMAGE.asc"
+    rm -f "$QCOW2.sha256" "$QCOW2.asc"
 fi
 exec 8>&-
 
