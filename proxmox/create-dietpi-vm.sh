@@ -91,8 +91,10 @@ if grep -Eq "\"vmid\":[[:space:]]*${VMID}[,}]" <<< "$CLUSTER_GUESTS"; then
 fi
 
 if [ "$ASSUME_DEFAULTS" = 1 ]; then
-    # the active storage with the most free space
-    STORAGE=$(pvesm status --content images | awk 'NR>1 && $3=="active"' | sort -k6 -n | tail -1 | awk '{print $1}')
+    # the active storage with the most free space, a network share only via
+    # the dialog
+    STORAGE=$(pvesm status --content images | awk 'NR>1 && $3=="active" && $2!~/^(cifs|nfs|glusterfs)$/' | sort -k6 -n | tail -1 | awk '{print $1}')
+    [ -n "$STORAGE" ] || { echo "Error: no active local storage with VM image support found, run without ASSUME_DEFAULTS to pick one." >&2; exit 1; }
 else
     STORAGE_OPTS=()
     while read -r name; do STORAGE_OPTS+=("$name" ""); done < <(pvesm status --content images | awk 'NR>1 && $3=="active" {print $1}')
